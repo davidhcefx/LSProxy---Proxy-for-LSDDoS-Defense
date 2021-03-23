@@ -12,18 +12,26 @@
 #include <sys/select.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <cassert>
 #include <string>
-#include <array>
 #include <memory>
+#include <queue>
+#include <unordered_map>
 #define ERRNOSTR            strerror(errno)
 #define ERROR(...)          {fprintf(stderr, __VA_ARGS__); exit(1);}
-#define MAX_CONNECTIONS     65536             // TODO: how much should it be?
-#define MAX_FILE_DES        4 + MAX_CONNECTIONS * 2  // each connection can hold up to two Fd
+#define MAX_CONNECTIONS     65536            // TODO: how much should it be?
+#define MAX_FILEBUF         MAX_CONNECTIONS  // each connection can have at most 3 Fds
+#define MAX_CLIENTS         MAX_CONNECTIONS
+#define MAX_SERVERS         MAX_CONNECTIONS
+#define MAX_FILE_DES        4 + MAX_FILEBUF + MAX_CLIENTS + MAX_SERVERS
 #define MAX_REQUEST_BODY    LONG_MAX
 #define IVAL_FILENO         -1
 using std::string;
 using std::to_string;
-using std::array;
+using std::unique_ptr;
+using std::make_unique;
+using std::queue;
+using std::unordered_map;
 
 /**
  * SPEC:
@@ -34,16 +42,34 @@ using std::array;
  * - Detect malicious connection by some rules (eg. Transfer Rate), and then
  *   perform action on it (eg. drop).
  * - Event-based architecture, supporting more than 65535 simultanous connections.
+ *
+ * File Descriptors: (n = MAX_CONNECTIONS)
+ *  0 ~ 3       stdin/stdout/stderr, master_sock
+ *  4 ~ n+3     filebuf
+ *  n+4 ~ 3n+3  client/server sockets
  */
+
+
+/* class for using files as buffers */
+class Filebuf {
+ public:
+    int fd;
+    string file_name;
+
+    Filebuf();
+    // clear buffer contents
+    void clear();
+};
 
 
 /* class for processing client requests */
 class Client {
  public:
     string addr;
-    int server_fd;
+    int server_fd;  // the associated server
 
-    Client(const struct sockaddr_in& _addr);
+    explicit Client(const struct sockaddr_in& _addr);
+    ~Client();
     // fires up connection with server once request completed
     void recv_msg(int fd);
     // creates an instance, adjust active_fds, and return client_fd
@@ -57,7 +83,8 @@ class Client {
     // request has body if value >= 100
     enum RequestType { NONE, GET, HEAD, DELETE, CONNECT, OPTIONS, TRACE, POST = 100, PUT, PATCH };
     RequestType req_type;
-    long long content_len;  // TODO: Transfer-Encoding ??
+    int64_t content_len;  // TODO: Transfer-Encoding ??
+    unique_ptr<Filebuf> filebuf;
 };
 
 
@@ -66,9 +93,9 @@ class Server {
  public:
     static char* address;        // the server to be protected
     static unsigned short port;  // the server to be protected
-    int client_fd;
+    int client_fd;  // the associated client
 
-    Server(int _client_fd);
+    explicit Server(int _client_fd);
     void recv_msg_and_reply(int fd);
     // creates an instance, adjust active_fds, and return server_fd
     static int create_connection();
