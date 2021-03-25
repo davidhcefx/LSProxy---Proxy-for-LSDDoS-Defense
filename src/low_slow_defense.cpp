@@ -1,9 +1,9 @@
 #include "./low_slow_defense.h"
 
 
-unordered_map<int, unique_ptr<Client>> clients(MAX_CLIENTS);  // use client_fd as key
-unordered_map<int, unique_ptr<Server>> servers(MAX_SERVERS);  // use server_fd as key
-queue<unique_ptr<Filebuf>> free_filebufs;
+unordered_map<int, shared_ptr<Client>> clients(MAX_CLIENTS);  // use client_fd as key
+unordered_map<int, shared_ptr<Server>> servers(MAX_SERVERS);  // use server_fd as key
+queue<shared_ptr<Filebuf>> free_filebufs;
 char* Server::address;
 unsigned short Server::port;
 fd_set active_fds;           // fd-set used by select
@@ -12,15 +12,16 @@ char read_buffer[10240];     // TODO: what size is appropriate?
 
 
 Filebuf::Filebuf() {
-    char template[] = "/tmp/low_slow_buf_XXXXXX";
-    if ((fd = mkstemp(template)) < 0) {
+    char name[] = "/tmp/low_slow_buf_XXXXXX";
+    if ((fd = mkstemp(name)) < 0) {
         ERROR("Cannot mkstemp: %s\n", ERRNOSTR);
     }
-    file_name = string(template);
+    file_name = string(name);
+    // printf("%d: %s\n", fd, name);
 }
 
 void Filebuf::clear() {
-    if (truncate(fd, 0) < 0) {
+    if (ftruncate(fd, 0) < 0) {
         fprintf(stderr, "Cannot truncate file %s: %s\n", file_name.c_str(), ERRNOSTR);
     }
     if (lseek(fd, 0, SEEK_SET) < 0) {  // rewind cursor
@@ -52,10 +53,8 @@ void Client::recv_msg(int fd) {
         Client::close_connection(fd);
         return;
     }
-    // open fd somewhere, with RDWR flag?
-
-    write(1, read_buffer, count);
-
+    write(filebuf->fd, read_buffer, count);
+    printf("Written %d bytes to %s\n", count, filebuf->file_name.c_str());
 }
 
 int Client::accept_connection(int master_sock) {
@@ -63,7 +62,8 @@ int Client::accept_connection(int master_sock) {
     socklen_t addr_len = sizeof(addr);
     int sock = accept(master_sock, (struct sockaddr*)&addr, &addr_len);
 
-    clients[sock] = make_unique<Client>(addr);
+    clients[sock] = make_shared<Client>(addr);
+    assert(sock > FILEBUF_LAST_FD);  // TODO: change to ERROR?
     FD_SET(sock, &active_fds);  // keep track
     return sock;
 }
@@ -89,7 +89,7 @@ int Server::create_connection() {
 void Server::close_connection(int server_fd) {
     close(server_fd);
     FD_CLR(server_fd, &active_fds);
-    servers[server_fd].reset(NULL);
+    servers.erase(server_fd);
 }
 
 int main(int argc, char* argv[]) {
@@ -100,33 +100,34 @@ int main(int argc, char* argv[]) {
         printf("\tport\tThe port of this proxy to be listening on. (default=8080)\n");
         exit(0);
     }
+    raise_open_file_limit(MAX_FILE_DES);
     Server::address = argv[1];
     Server::port = atoi(argv[2]);
     unsigned short port = (argc >= 4) ? atoi(argv[3]) : 8080;
 
     int master_sock = passiveTCP(port);  // fd should be 3
     for (int i = 0; i < MAX_FILEBUF; i++) {
-        free_filebufs.push(make_unique<Filebuf>());
+        free_filebufs.push(make_shared<Filebuf>());
     }
-    assert(master_sock == 3 && free_filebufs.back()->fd == 3 + MAX_FILEBUF);
-    int filebuf_last_fd = 3 + MAX_FILEBUF;
+    assert(master_sock == 3 && free_filebufs.back()->fd == FILEBUF_LAST_FD);
     FD_ZERO(&active_fds);
     FD_SET(master_sock, &active_fds);  // keep track master_sock
-    raise_open_file_limit(MAX_FILE_DES);
 
     while (true) {
         memcpy(&read_fds, &active_fds, sizeof(read_fds));
 
+        printf("Select\n");
         if (select(MAX_FILE_DES, &read_fds, NULL, NULL, NULL) < 0) {
             ERROR("Error in select: %s\n", ERRNOSTR);
         }
-        for (int fd = filebuf_last_fd + 1 ; fd < MAX_FILE_DES; fd++) {
+        if (FD_ISSET(master_sock, &read_fds)) {
+            // new connection
+            int sock = Client::accept_connection(master_sock);
+            printf("Connected by %s\n", clients[sock]->addr.c_str());
+        }
+        for (int fd = FILEBUF_LAST_FD + 1 ; fd < MAX_FILE_DES; fd++) {
             if (FD_ISSET(fd, &read_fds)) {
-                if (fd == master_sock) {
-                    // new connection
-                    int sock = Client::accept_connection(master_sock);
-                    printf("Connected by %s\n", clients[sock]->addr.c_str());
-                } else if (clients.contains(fd)) {
+                if (clients.contains(fd)) {
                     // message from client
                     clients[fd]->recv_msg(fd);
                 } else if (servers.contains(fd)) {
@@ -138,6 +139,12 @@ int main(int argc, char* argv[]) {
                 }
             }
         }
+        for (int fd = 0 ; fd < MAX_FILE_DES; fd++) {
+            if (FD_ISSET(fd, &read_fds))
+                printf("%d, ", fd);
+        }
+        printf("\n");
+        getchar();
     }
     return 0;
 }

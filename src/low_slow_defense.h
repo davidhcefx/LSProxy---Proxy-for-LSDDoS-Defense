@@ -9,9 +9,9 @@
 #include <errno.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
-#include <sys/select.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <event2/event.h>
 #include <cassert>
 #include <string>
 #include <memory>
@@ -19,17 +19,18 @@
 #include <unordered_map>
 #define ERRNOSTR            strerror(errno)
 #define ERROR(...)          {fprintf(stderr, __VA_ARGS__); exit(1);}
-#define MAX_CONNECTIONS     65536            // TODO: how much should it be?
+#define MAX_CONNECTIONS     655 //36            // TODO: how much should it be?
 #define MAX_FILEBUF         MAX_CONNECTIONS  // each connection can have at most 3 Fds
 #define MAX_CLIENTS         MAX_CONNECTIONS
 #define MAX_SERVERS         MAX_CONNECTIONS
 #define MAX_FILE_DES        4 + MAX_FILEBUF + MAX_CLIENTS + MAX_SERVERS
+#define FILEBUF_LAST_FD     MAX_CONNECTIONS + 3  // see below filebuf range
 #define MAX_REQUEST_BODY    LONG_MAX
 #define IVAL_FILENO         -1
 using std::string;
 using std::to_string;
-using std::unique_ptr;
-using std::make_unique;
+using std::shared_ptr;
+using std::make_shared;
 using std::queue;
 using std::unordered_map;
 
@@ -84,7 +85,7 @@ class Client {
     enum RequestType { NONE, GET, HEAD, DELETE, CONNECT, OPTIONS, TRACE, POST = 100, PUT, PATCH };
     RequestType req_type;
     int64_t content_len;  // TODO: Transfer-Encoding ??
-    unique_ptr<Filebuf> filebuf;
+    shared_ptr<Filebuf> filebuf;
 };
 
 
@@ -161,7 +162,7 @@ int connectTCP(const char* host, unsigned short port) {
     struct addrinfo* info;
     int sockFd;
 
-    if (getaddrinfo(host, NULL, NULL, &info) == 0) {
+    if (getaddrinfo(host, NULL, NULL, &info) == 0) {  // TODO(davidhcefx): change to async DNS resolution
         memcpy(&addr, info->ai_addr, sizeof(addr));
     } else if ((addr.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE) {
         ERROR("Cannot resolve host addr: %s\n", host);
@@ -172,7 +173,7 @@ int connectTCP(const char* host, unsigned short port) {
     if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         ERROR("Cannot create socket: %s\n", ERRNOSTR);
     }
-    if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {
+    if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {  // TODO(davidhcefx): non-blocking connect
         ERROR("Cannot connect to %s (%d): %s\n", get_host(addr), get_port(addr), ERRNOSTR);
     }
     printf("Connected to %s (%d)\n", get_host(addr), get_port(addr));
