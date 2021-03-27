@@ -1,17 +1,14 @@
 #include "./low_slow_defense.h"
 
 
-unordered_map<int, shared_ptr<Client>> clients(MAX_CLIENTS);  // use client_fd as key
-unordered_map<int, shared_ptr<Server>> servers(MAX_SERVERS);  // use server_fd as key
 queue<shared_ptr<Filebuf>> free_filebufs;
 char* Server::address;
 unsigned short Server::port;
-fd_set active_fds;           // fd-set used by select
-fd_set read_fds;
+struct event_base* evt_base;
 char read_buffer[10240];     // TODO: what size is appropriate?
 
 
-Filebuf::Filebuf() {
+Filebuf::Filebuf(): data_size{0} {
     char name[] = "/tmp/low_slow_buf_XXXXXX";
     if ((fd = mkstemp(name)) < 0) {
         ERROR("Cannot mkstemp: %s\n", ERRNOSTR);
@@ -20,76 +17,161 @@ Filebuf::Filebuf() {
     // printf("%d: %s\n", fd, name);
 }
 
-void Filebuf::clear() {
-    if (ftruncate(fd, 0) < 0) {
-        fprintf(stderr, "Cannot truncate file %s: %s\n", file_name.c_str(), ERRNOSTR);
+void Filebuf::write(const char* buffer, int count) {
+    if (write(fd, buffer, count) < 0) {  // TODO: make sure size matches
+        fprintf(stderr, "Write failed: %s\n", ERRNOSTR);
     }
-    if (lseek(fd, 0, SEEK_SET) < 0) {  // rewind cursor
+    data_size += count;
+    printf("Written %d bytes to %s\n", count, file_name.c_str());
+}
+
+int Filebuf::read(char* buffer, int size) {
+    // TODO: data_size
+    return read(fd, buffer, size);
+}
+
+void Filebuf::rewind() {
+    if (lseek(fd, 0, SEEK_SET) < 0) {
         fprintf(stderr, "Cannot lseek: %s\n", ERRNOSTR);
     }
 }
 
-Client::Client(const struct sockaddr_in& _addr):
-    addr{get_host_and_port(_addr)}, server_fd{IVAL_FILENO}, req_type{NONE}, content_len{0}
+void Filebuf::clear() {
+    if (ftruncate(fd, 0) < 0) {
+        fprintf(stderr, "Cannot truncate file %s: %s\n", file_name.c_str(), ERRNOSTR);
+    }
+    rewind();
+}
+
+Client::Client(int fd, const struct sockaddr_in& _addr, shared_ptr<Filebuf> _filebuf):
+    addr{get_host_and_port(_addr)}, req_type{NONE}, content_len{0}, filebuf{_filebuf},
+    filebuf_from_pool{false}
 {
-    // allocate filebuf
-    assert(!free_filebufs.empty());
-    filebuf = free_filebufs.front();
-    free_filebufs.pop();
+    // allocate events
+    read_evt.reset(new_read_event(fd, Client::recv_msg, this));
+    write_evt.reset(new_write_event(fd, Client::send_msg, this));
+    if (!filebuf) {
+        filebuf_from_pool = true;
+        filebuf = free_filebufs.front();
+        free_filebufs.pop();
+    }
 }
 
 Client::~Client() {
-    // release filebuf
-    free_filebufs.push(filebuf);
-}
-
-void Client::recv_msg(int fd) {
-    int count = read(fd, read_buffer, sizeof(read_buffer));
-    if (count <= 0) {  // premature close
-        if (server_fd != IVAL_FILENO) {
-            Server::close_connection(server_fd);
-            server_fd = IVAL_FILENO;
-        }
-        Client::close_connection(fd);
-        return;
+    printf("Connection closed: %s\n", addr.c_str());
+    int fd = event_get_fd(read_evt);
+    close(fd);
+    event_del(read_evt);
+    event_del(write_evt);
+    if (filebuf_from_pool) {
+        free_filebufs.push(filebuf);
     }
-    write(filebuf->fd, read_buffer, count);
-    printf("Written %d bytes to %s\n", count, filebuf->file_name.c_str());
 }
 
-int Client::accept_connection(int master_sock) {
+void Client::accept_connection(int master_sock, short flag, void* arg) {
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
     int sock = accept(master_sock, (struct sockaddr*)&addr, &addr_len);
-
-    clients[sock] = make_shared<Client>(addr);
-    assert(sock > FILEBUF_LAST_FD);  // TODO: change to ERROR?
-    FD_SET(sock, &active_fds);  // keep track
-    return sock;
+    if (evutil_make_socket_nonblocking(sock) < 0) {
+        ERROR("Cannot make socket nonblocking: %s\n", ERRNOSTR);
+    }
+    if (free_filebufs.empty()) {
+        fprintf(stderr, "Max connection %d reached.\n", MAX_CONNECTIONS);
+        shared_ptr<Client> client(new Client(sock, addr, make_shared<Filebuf>()));
+        init_with_503_file(client->filebuf);
+        event_add(client->write_evt);
+    } else {
+        shared_ptr<Client> client(new Client(sock, addr));
+        event_add(client->read_evt.get());
+        printf("Connected by %s\n", client->addr.c_str());
+    }
 }
 
-void Client::close_connection(int client_fd) {
-    printf("Connection closed: %s\n", clients[client_fd]->addr.c_str());
-    close(client_fd);
-    FD_CLR(client_fd, &active_fds);
-    clients.erase(client_fd);
+void Client::recv_msg(int fd, short flag, void* arg) {
+    Client* client = (Client*)arg;
+    int count = read(fd, read_buffer, sizeof(read_buffer));
+    if (count <= 0) {  // premature close
+        if (count < 0) {
+            fprintf(stderr, "Error reading from client: %s\n", ERRNOSTR);
+        }
+        if (client->server) {
+            client->server->~Server();
+        }
+        client->~Client();
+        return;
+    }
+    client->filebuf->write(read_buffer, count);
+    if (getchar() == '1') {    // TODO: at some point
+        // send request to server
+        event_del(client->read_evt);  // disable further reads
+        client->filebuf->rewind();
+        shared_ptr<Server> server(new Server(client));
+        event_add(server->write_evt);
+    }
 }
 
-Server::Server(int _client_fd): client_fd{_client_fd} {}
-
-void Server::recv_msg_and_reply(int fd) {
-
+void Client::send_msg(int fd, short flag, void* arg) {
+    Client* client = (Client*)arg;
+    int n = client->filebuf->read(read_buffer, sizeof(read_buffer));
+    int count = write(fd, read_buffer, n);  // TODO: subtract?
+    if (count <= 0) {  // TODO: catch PIPE_ERROR ?
+        count;
+    }
+    // TODO: at some time
+    if (getchar() == '4') {
+        client->~Client();
+    }
 }
 
-int Server::create_connection() {
-    // int sock = connectTCP(Server::address, 80);
-
+Server::Server(Client* _client): client{_client}, filebuf{_client->filebuf} {
+    int sock = connectTCP(Server::address, Server::port);
+    if (evutil_make_socket_nonblocking(sock) < 0) {
+        ERROR("Cannot make socket nonblocking: %s\n", ERRNOSTR);
+    }
+    // allocate events
+    read_evt.reset(new_read_event(sock, Server::recv_msg_and_reply, this));
+    write_evt.reset(new_write_event(sock, Server::send_msg, this));
 }
 
-void Server::close_connection(int server_fd) {
-    close(server_fd);
-    FD_CLR(server_fd, &active_fds);
-    servers.erase(server_fd);
+Server::~Server() {
+    int fd = event_get_fd(read_evt);
+    close(fd);
+    event_del(read_evt);
+    event_del(write_evt);
+    filebuf.reset(NULL);
+}
+
+void Server::send_msg(int fd, short flag, void* arg) {
+    Server* server = (Server*)arg;
+    int n = server->filebuf->read(read_buffer, sizeof(read_buffer));
+    int count = write(fd, read_buffer, n);  // TODO: subtract?
+    if (count <= 0) {  // TODO: catch PIPE_ERROR ?
+        count;
+    }
+    // TODO: at some point
+    if (getchar() == '2') {
+        // get response
+        event_del(server->write_evt);
+        server->filebuf->clear();
+        event_add(server->read_evt);
+    }
+}
+
+void Server::recv_msg(int fd, short flag, void* arg) {
+    Server* server = (Server*)arg;
+    int count = read(fd, read_buffer, sizeof(read_buffer));
+    if (count <= 0) {  // premature close
+        count;
+    }
+    server->filebuf->write(read_buffer, count);
+    // TODO: at some point
+    if (getchar() == '3') {
+        // response to client
+        event_del(server->read_evt);
+        server->filebuf->rewind();
+        server->~Server();  // destroy server
+        event_add(client->write_evt);
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -100,51 +182,20 @@ int main(int argc, char* argv[]) {
         printf("\tport\tThe port of this proxy to be listening on. (default=8080)\n");
         exit(0);
     }
-    raise_open_file_limit(MAX_FILE_DES);
     Server::address = argv[1];
     Server::port = atoi(argv[2]);
     unsigned short port = (argc >= 4) ? atoi(argv[3]) : 8080;
 
+    raise_open_file_limit(MAX_FILE_DES);
     int master_sock = passiveTCP(port);  // fd should be 3
     for (int i = 0; i < MAX_FILEBUF; i++) {
         free_filebufs.push(make_shared<Filebuf>());
     }
     assert(master_sock == 3 && free_filebufs.back()->fd == FILEBUF_LAST_FD);
-    FD_ZERO(&active_fds);
-    FD_SET(master_sock, &active_fds);  // keep track master_sock
-
-    while (true) {
-        memcpy(&read_fds, &active_fds, sizeof(read_fds));
-
-        printf("Select\n");
-        if (select(MAX_FILE_DES, &read_fds, NULL, NULL, NULL) < 0) {
-            ERROR("Error in select: %s\n", ERRNOSTR);
-        }
-        if (FD_ISSET(master_sock, &read_fds)) {
-            // new connection
-            int sock = Client::accept_connection(master_sock);
-            printf("Connected by %s\n", clients[sock]->addr.c_str());
-        }
-        for (int fd = FILEBUF_LAST_FD + 1 ; fd < MAX_FILE_DES; fd++) {
-            if (FD_ISSET(fd, &read_fds)) {
-                if (clients.contains(fd)) {
-                    // message from client
-                    clients[fd]->recv_msg(fd);
-                } else if (servers.contains(fd)) {
-                    // message from server
-                    servers[fd]->recv_msg_and_reply(fd);
-                    // TODO: when to close connection?
-                } else {
-                    ERROR("[bug] Unrecognized fd %d not belonging to anyone.\n", fd);
-                }
-            }
-        }
-        for (int fd = 0 ; fd < MAX_FILE_DES; fd++) {
-            if (FD_ISSET(fd, &read_fds))
-                printf("%d, ", fd);
-        }
-        printf("\n");
-        getchar();
+    event_add(new_read_event(master_sock, Client::accept_connection));
+    if (event_base_dispatch(evt_base) < 0) {
+        ERROR("Cannot dispatch event: %s\n", ERRNOSTR);
     }
+
     return 0;
 }
