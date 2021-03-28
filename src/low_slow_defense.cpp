@@ -13,32 +13,47 @@ Filebuf::Filebuf(): data_size{0} {
     if ((fd = mkstemp(name)) < 0) {
         ERROR("Cannot mkstemp: %s\n", ERRNOSTR);
     }
+    if (make_file_nonblocking(fd) < 0) {
+        ERROR("Cannot make file nonblocking: %s\n", ERRNOSTR);
+    }
     file_name = string(name);
     // printf("%d: %s\n", fd, name);
 }
 
-void Filebuf::write(const char* buffer, int count) {
-    if (write(fd, buffer, count) < 0) {  // TODO: make sure size matches
-        fprintf(stderr, "Write failed: %s\n", ERRNOSTR);
+void Filebuf::write(const char* buffer, int num) {
+    data_size += num;
+    printf("Writing %d bytes to %s\n", num, file_name.c_str());
+
+    for (int i = 0; i < 100 && num > 0; i++) {  // try 100 times
+        int count = write(fd, buffer, num);
+        if (count > 0) {
+            num -= count;
+        } else if (errno != EAGAIN && errno != EINTR) {  // blocking or interrupt
+            ERROR("Write failed: %s\n", ERRNOSTR);
+        }
     }
-    data_size += count;
-    printf("Written %d bytes to %s\n", count, file_name.c_str());
+    if (num > 0) {
+        ERROR("Write failed: %s\n", ERRNOSTR);
+    }
 }
 
 int Filebuf::read(char* buffer, int size) {
-    // TODO: data_size
     return read(fd, buffer, size);
 }
 
 void Filebuf::rewind() {
     if (lseek(fd, 0, SEEK_SET) < 0) {
-        fprintf(stderr, "Cannot lseek: %s\n", ERRNOSTR);
+        ERROR("Cannot lseek: %s\n", ERRNOSTR);
     }
 }
 
 void Filebuf::clear() {
     if (ftruncate(fd, 0) < 0) {
-        fprintf(stderr, "Cannot truncate file %s: %s\n", file_name.c_str(), ERRNOSTR);
+        if (errno == EINTR && ftruncate(fd, 0) == 0) {  // if interrupted
+            // pass
+        } else {
+            ERROR(stderr, "Cannot truncate file %s: %s\n", file_name.c_str(), ERRNOSTR);
+        }
     }
     rewind();
 }
@@ -78,11 +93,11 @@ void Client::accept_connection(int master_sock, short flag, void* arg) {
     if (free_filebufs.empty()) {
         fprintf(stderr, "Max connection %d reached.\n", MAX_CONNECTIONS);
         shared_ptr<Client> client(new Client(sock, addr, make_shared<Filebuf>()));
-        init_with_503_file(client->filebuf);
+        init_with_503_file(client->filebuf);  // reply with 503 unavailable
         event_add(client->write_evt);
     } else {
         shared_ptr<Client> client(new Client(sock, addr));
-        event_add(client->read_evt.get());
+        event_add(client->read_evt);
         printf("Connected by %s\n", client->addr.c_str());
     }
 }
@@ -113,7 +128,8 @@ void Client::recv_msg(int fd, short flag, void* arg) {
 void Client::send_msg(int fd, short flag, void* arg) {
     Client* client = (Client*)arg;
     int n = client->filebuf->read(read_buffer, sizeof(read_buffer));
-    int count = write(fd, read_buffer, n);  // TODO: subtract?
+    // TODO: if (n)
+    int count = write(fd, read_buffer, n);
     if (count <= 0) {  // TODO: catch PIPE_ERROR ?
         count;
     }
@@ -144,7 +160,8 @@ Server::~Server() {
 void Server::send_msg(int fd, short flag, void* arg) {
     Server* server = (Server*)arg;
     int n = server->filebuf->read(read_buffer, sizeof(read_buffer));
-    int count = write(fd, read_buffer, n);  // TODO: subtract?
+    // TODO: if (n)
+    int count = write(fd, read_buffer, n);
     if (count <= 0) {  // TODO: catch PIPE_ERROR ?
         count;
     }
@@ -172,6 +189,75 @@ void Server::recv_msg(int fd, short flag, void* arg) {
         server->~Server();  // destroy server
         event_add(client->write_evt);
     }
+}
+
+void init_with_503_file(shared_ptr<Filebuf> filebuf) {
+    char* header = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\n\r\n";
+    filebuf.write(header, strlen(header));
+    int fd = open("503.html", O_RDONLY);
+    int n;
+    while ((n = read(fd, read_buffer, sizeof(read_buffer))) > 0) {
+        filebuf.write(read_buffer, n);
+    }
+}
+
+void raise_open_file_limit(unsigned long value) {
+    struct rlimit lim;
+
+    if (getrlimit(RLIMIT_NOFILE, &lim) < 0) {
+        ERROR("Cannot getrlimit: %s\n", ERRNOSTR);
+    }
+    if (lim.rlim_max < value) {
+        ERROR("Please raise hard limit of RLIMIT_NOFILE above %lu.\n", value);
+    }
+    lim.rlim_cur = value;
+    if (setrlimit(RLIMIT_NOFILE, &lim) < 0) {
+        ERROR("Cannot setrlimit: %s\n", ERRNOSTR)
+    }
+}
+
+int passiveTCP(unsigned short port, int qlen) {
+    struct sockaddr_in addr;
+    int sockFd;
+
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+
+    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        ERROR("Cannot create socket: %s\n", ERRNOSTR);
+    }
+    if (bind(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        ERROR("Cannot bind to port %d: %s\n", port, ERRNOSTR);
+    }
+    if (listen(sockFd, qlen) < 0) {
+        ERROR("Cannot listen: %s\n", ERRNOSTR);
+    }
+    printf("Listening on port %d...\n", port);
+    return sockFd;
+}
+
+int connectTCP(const char* host, unsigned short port) {
+    struct sockaddr_in addr;
+    struct addrinfo* info;
+    int sockFd;
+
+    if (getaddrinfo(host, NULL, NULL, &info) == 0) {  // TODO(davidhcefx): async DNS resolution (see libevent doc)
+        memcpy(&addr, info->ai_addr, sizeof(addr));
+    } else if ((addr.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE) {
+        ERROR("Cannot resolve host addr: %s\n", host);
+    }
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+
+    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        ERROR("Cannot create socket: %s\n", ERRNOSTR);
+    }
+    if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {  // TODO(davidhcefx): non-blocking connect
+        ERROR("Cannot connect to %s (%d): %s\n", get_host(addr), get_port(addr), ERRNOSTR);
+    }
+    printf("Connected to %s (%d)\n", get_host(addr), get_port(addr));
+    return sockFd;
 }
 
 int main(int argc, char* argv[]) {

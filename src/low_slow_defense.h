@@ -44,14 +44,14 @@ using std::queue;
  */
 
 
-/* class for using files as buffers */
+/* class for using files as buffer */
 class Filebuf {
  public:
     int fd;
 
     Filebuf();
-    // guaranteed to write count bytes
-    void write(const char* buffer, int count);
+    // write num bytes successfuly or abort
+    void write(const char* buffer, int num);
     int read(char* buffer, int size);
     void rewind();
     // clear buffer contents
@@ -84,7 +84,7 @@ class Client {
     // free instance after finished
     static void send_msg(int fd, short flag, void* arg);
 
-    // when it sees CRLF, it sets content_len if request type has body (beware of overflow)
+    // TODO: when it sees CRLF, it sets content_len if request type has body (beware of overflow)
 
  private:
     // request has body if value >= 100
@@ -114,18 +114,18 @@ class Server {
     // recv to buffer; response to client after finished
     static void recv_msg(int fd, short flag, void* arg);
 
-    // cut off connection or something to deal with keep-alive
+    // TODO: cut off connection or something to deal with keep-alive
 
  private:
     shared_ptr<Filebuf> filebuf;  // the same filebuf as client's
 };
 
 
-char* get_host(const struct sockaddr_in& addr) {
+inline char* get_host(const struct sockaddr_in& addr) {
     return inet_ntoa(addr.sin_addr);
 }
 
-int get_port(const struct sockaddr_in& addr) {
+inline int get_port(const struct sockaddr_in& addr) {
     return ntohs(addr.sin_port);
 }
 
@@ -133,36 +133,18 @@ string get_host_and_port(const struct sockaddr_in& addr) {
     return string(get_host(addr)) + ":" + to_string(get_port(addr));
 }
 
-void raise_open_file_limit(unsigned long value) {
-    struct rlimit lim;
-
-    if (getrlimit(RLIMIT_NOFILE, &lim) < 0) {
-        ERROR("Cannot getrlimit: %s\n", ERRNOSTR);
-    }
-    if (lim.rlim_max < value) {
-        ERROR("Please raise hard limit of RLIMIT_NOFILE above %lu.\n", value);
-    }
-    lim.rlim_cur = value;
-    if (setrlimit(RLIMIT_NOFILE, &lim) < 0) {
-        ERROR("Cannot setrlimit: %s\n", ERRNOSTR)
-    }
+inline int make_file_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
-
-extern char read_buffer[];
 
 // fill filebuf with contents of '503.html'
-void init_with_503_file(shared_ptr<Filebuf> filebuf) {
-    char* header = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\n\r\n";
-    filebuf.write(header, strlen(header));
-    int fd = open("503.html", O_RDONLY);
-    int n;
-    while ((n = read(fd, read_buffer, sizeof(read_buffer))) > 0) {
-        filebuf.write(read_buffer, n);
-    }
-}
+void init_with_503_file(shared_ptr<Filebuf> filebuf);
+
+// raise system-wide RLIMIT_NOFILE
+void raise_open_file_limit(unsigned long value);
 
 extern struct event_base* evt_base;
-
 inline struct event* new_read_event(int fd, event_callback_fn cb, void* arg = NULL) {
     return event_new(evt_base, fd, EV_READ | EV_PERSIST, cb, arg);
 }
@@ -171,62 +153,30 @@ inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = N
     return event_new(evt_base, fd, EV_WRITE | EV_PERSIST, cb, arg);
 }
 
-inline void event_add(struct event* ev) {
-    if (event_add(ev, NULL) < 0) {
+inline void event_add(struct event* evt) {
+    if (event_add(evt, NULL) < 0) {
         ERROR("Cannot add event: %s\n", ERRNOSTR);
     }
 }
 
-inline void event_del(struct event* ev) {
-    if (event_del(ev) < 0) {
+inline void event_add(const shared_ptr<struct event>& evt) {
+    event_add(evt.get());
+}
+
+inline void event_del(struct event* evt) {
+    if (event_del(evt) < 0) {
         ERROR("Cannot del event: %s\n", ERRNOSTR);
     }
 }
 
-// return master socket Fd
-int passiveTCP(unsigned short port, int qlen = 128) {
-    struct sockaddr_in addr;
-    int sockFd;
-
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-
-    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        ERROR("Cannot create socket: %s\n", ERRNOSTR);
-    }
-    if (bind(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        ERROR("Cannot bind to port %d: %s\n", port, ERRNOSTR);
-    }
-    if (listen(sockFd, qlen) < 0) {
-        ERROR("Cannot listen: %s\n", ERRNOSTR);
-    }
-    printf("Listening on port %d...\n", port);
-    return sockFd;
+inline void event_del(const shared_ptr<struct event>& evt) {
+    event_del(evt.get());
 }
+
+// return master socket Fd
+int passiveTCP(unsigned short port, int qlen = 128)
 
 // return socket Fd; host can be either hostname or IP address.
-int connectTCP(const char* host, unsigned short port) {
-    struct sockaddr_in addr;
-    struct addrinfo* info;
-    int sockFd;
-
-    if (getaddrinfo(host, NULL, NULL, &info) == 0) {  // TODO(davidhcefx): change to async DNS resolution
-        memcpy(&addr, info->ai_addr, sizeof(addr));
-    } else if ((addr.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE) {
-        ERROR("Cannot resolve host addr: %s\n", host);
-    }
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-
-    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        ERROR("Cannot create socket: %s\n", ERRNOSTR);
-    }
-    if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {  // TODO(davidhcefx): non-blocking connect
-        ERROR("Cannot connect to %s (%d): %s\n", get_host(addr), get_port(addr), ERRNOSTR);
-    }
-    printf("Connected to %s (%d)\n", get_host(addr), get_port(addr));
-    return sockFd;
-}
+int connectTCP(const char* host, unsigned short port);
 
 #endif  // LOW_SLOW_DEFENSE_H_
