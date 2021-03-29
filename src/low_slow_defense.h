@@ -1,5 +1,5 @@
-#ifndef LOW_SLOW_DEFENSE_H_
-#define LOW_SLOW_DEFENSE_H_
+#ifndef SRC_LOW_SLOW_DEFENSE_H_
+#define SRC_LOW_SLOW_DEFENSE_H_
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,15 +12,29 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <event2/event.h>
+#include <cmath>
 #include <cassert>
 #include <string>
 #include <memory>
 #include <queue>
-#define ERRNOSTR            strerror(errno)
-#define ERROR(...)          {fprintf(stderr, __VA_ARGS__); exit(1);}
-#define MAX_CONNECTIONS     655 // 36     // adjust it if needed
+#define MAX_CONNECTIONS     655  // 36     // adjust it if needed
 #define MAX_FILEBUF         MAX_CONNECTIONS
-#define MAX_REQUEST_BODY    LONG_MAX
+#define MAX_HEADER_SIZE     8 * 1024   // 8 KB
+#define MAX_BODY_SIZE       ULONG_MAX  // 2^64 B
+#define ERROR(fmt, ...)     {fprintf(stderr, fmt ": %s\n", __VA_ARGS__, strerror(errno));}
+#define ERROR_EXIT(...)     {ERROR(__VA_ARGS__); exit(1)}
+#define LOG_LEVEL_1
+#define LOG_LEVEL_2
+#ifdef  LOG_LEVEL_1
+#define LOG1(...)           {printf(__VA_ARGS__);}
+#else
+#define LOG1(...)           {}
+#endif  // LOG_LEVEL_1
+#ifdef  LOG_LEVEL_2
+#define LOG2(...)           {printf(__VA_ARGS__);}
+#else
+#define LOG2(...)           {}
+#endif  // LOG_LEVEL_2
 using std::string;
 using std::to_string;
 using std::shared_ptr;
@@ -44,23 +58,43 @@ using std::queue;
  */
 
 
-/* class for using files as buffer */
+namespace RequestType {
+    enum Type {  // request has body if and only if value >= 100
+        NONE, GET, HEAD, DELETE, CONNECT, OPTIONS, TRACE,
+        POST = 100, PUT, PATCH
+    };
+}
+
+/* class for using memory and file as buffer */
 class Filebuf {
  public:
-    int fd;
+    int write_count;
 
     Filebuf();
-    // write num bytes successfuly or abort
+    ~Filebuf();
+    int get_fd() {return fd;}
+    // data might be lost upon failure of writing to the file
     void write(const char* buffer, int num);
+    // print warning message if failed
     int read(char* buffer, int size);
+    // rewind all cursors
     void rewind();
-    // clear buffer contents
+    // clear contents and rewind
     void clear();
+    RequestType::Type parse_request_type();
+    // search for header in mem buffer; store value as NULL-terminated string
+    // crlf_header_name: header name with CRLF prepended
+    void search_header_membuf(const char* crlf_header_name, char* result);
 
  private:
-    int data_size;
+    // memory buffer
+    char buffer[MAX_HEADER_SIZE + 1];  // NULL-terminated
+    int cur_pos;
+    // file buffer (storing overflow data)
+    int fd;
     string file_name;
 };
+
 
 class Server;
 
@@ -76,7 +110,8 @@ class Client {
     Client(int fd, const struct sockaddr_in& _addr, shared_ptr<Filebuf> _filebuf = NULL);
     // close socket, remove the events and release filebuf
     ~Client();
-
+    // check CRLF, transfer-encoding or content-length  // TODO: transfer-encoding
+    bool check_request_completed(int last_read_count);
     // creates an instance and add read event
     static void accept_connection(int master_sock, short flag, void* arg);
     // recv to buffer; fires up connection with server once request completed
@@ -84,13 +119,9 @@ class Client {
     // free instance after finished
     static void send_msg(int fd, short flag, void* arg);
 
-    // TODO: when it sees CRLF, it sets content_len if request type has body (beware of overflow)
-
  private:
-    // request has body if value >= 100
-    enum RequestType { NONE, GET, HEAD, DELETE, CONNECT, OPTIONS, TRACE, POST = 100, PUT, PATCH };
-    RequestType req_type;
-    int64_t content_len;  // TODO: Transfer-Encoding ??
+    RequestType::Type req_type;
+    unsigned long int content_len;  // TODO: Transfer-Encoding ??
     shared_ptr<Filebuf> filebuf;
     bool filebuf_from_pool;  // whether filebuf is allocated from pool
 };
@@ -109,6 +140,8 @@ class Server {
     explicit Server(Client* _client);
     // close socket and remove the events
     ~Server();
+    // check for content-length   // TODO: or what?
+    bool check_response_completed(int last_read_count);
     // send from buffer; clears buffer for response after finished
     static void send_msg(int fd, short flag, void* arg);
     // recv to buffer; response to client after finished
@@ -117,6 +150,7 @@ class Server {
     // TODO: cut off connection or something to deal with keep-alive
 
  private:
+    unsigned long int content_len;  // TODO: Transfer-Encoding ??
     shared_ptr<Filebuf> filebuf;  // the same filebuf as client's
 };
 
@@ -155,7 +189,7 @@ inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = N
 
 inline void event_add(struct event* evt) {
     if (event_add(evt, NULL) < 0) {
-        ERROR("Cannot add event: %s\n", ERRNOSTR);
+        ERROR_EXIT("Cannot add event");
     }
 }
 
@@ -165,7 +199,7 @@ inline void event_add(const shared_ptr<struct event>& evt) {
 
 inline void event_del(struct event* evt) {
     if (event_del(evt) < 0) {
-        ERROR("Cannot del event: %s\n", ERRNOSTR);
+        ERROR_EXIT("Cannot del event");
     }
 }
 
@@ -179,4 +213,4 @@ int passiveTCP(unsigned short port, int qlen = 128)
 // return socket Fd; host can be either hostname or IP address.
 int connectTCP(const char* host, unsigned short port);
 
-#endif  // LOW_SLOW_DEFENSE_H_
+#endif  // SRC_LOW_SLOW_DEFENSE_H_
