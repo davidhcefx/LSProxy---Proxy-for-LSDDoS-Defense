@@ -1,14 +1,16 @@
-#include "src/low_slow_defense.h"
+#include "low_slow_defense.h"
 
 
 queue<shared_ptr<Filebuf>> free_filebufs;
+struct event_base* evt_base;
+char read_buffer[10240];  // temporary buffer //TODO: what size is appropriate?
+// class variables
 char* Server::address;
 unsigned short Server::port;
-struct event_base* evt_base;
-char read_buffer[10240];     // TODO: what size is appropriate?
+int Server::connection_count = 0;
 
 
-Filebuf::Filebuf(): write_count{0}, cur_pos{0} {
+Filebuf::Filebuf(): data_size{0}, cur_pos{0} {
     buffer[0] = '\0';
     char name[] = "/tmp/low_slow_buf_XXXXXX";
     if ((fd = mkstemp(name)) < 0) {
@@ -25,27 +27,34 @@ Filebuf::~Filebuf() {
     close(fd);
 }
 
-void Filebuf::write(const char* buffer, int num) {
+void Filebuf::store(const char* data, int size) {
     // TODO: new version
-    write_count += num;
-    // LOG2("Writing %d bytes to %s\n", num, file_name.c_str());
 
-    for (int i = 0; i < 100 && num > 0; i++) {  // try 100 times
-        int count = write(fd, buffer, num);
+    memcpy(buffer, data, ??)
+    sizeof(buffer)
+    buffer
+
+    int remain = size;
+    for (int i = 0; i < 10 && remain > 0; i++) {  // try 10 times
+        int count = write(fd, data, remain);
         if (count > 0) {
-            num -= count;
-        } else if (errno != EAGAIN && errno != EINTR) {  // blocking or interrupt
-            ERROR_EXIT("Write failed");  // TODO: don't abort
+            remain -= count;
+        } else if (errno != EAGAIN && errno != EINTR) {  // not blocking nor interrupt
+            ERROR("Write failed");
+            usleep(100);  // wait for 100us
         }
     }
-    if (num > 0) {
-        ERROR_EXIT("Write failed");
+    if (remain > 0) {
+        WARNING("%d bytes could not be written and were lost", remain);
     }
+    data_size += size - remain;
+    LOG2("Wrote %d bytes to %s\n", size - remain, file_name.c_str());
 }
 
-int Filebuf::read(char* buffer, int size) {
+int Filebuf::fetch(char* result, int max_size) {
     // TODO: new version
-    int count = read(fd, buffer, size);
+
+    int count = read(fd, result, max_size);
     if (count < 0) {
         ERROR("Read failed (%s)", file_name.c_str());
     }
@@ -60,7 +69,7 @@ void Filebuf::rewind() {
 }
 
 void Filebuf::clear() {
-    write_count = 0;
+    data_size = 0;
     if (ftruncate(fd, 0) < 0) {
         if (errno == EINTR && ftruncate(fd, 0) == 0) {  // if interrupted
             // pass
@@ -92,40 +101,37 @@ void Filebuf::search_header_membuf(const char* crlf_header_name, char* result) {
     result[count] = '\0';
 }
 
-Client::Client(int fd, const struct sockaddr_in& _addr, shared_ptr<Filebuf> _filebuf):
-    addr{get_host_an gd_port(_addr)}, req_type{RequestType::NONE}, content_len{0},
-    filebuf{_filebuf}, filebuf_from_pool{false}
+Client::Client(int fd, const struct sockaddr_in& _addr):
+    addr{get_host_and_port(_addr)}, server{NULL}, req_type{RequestType::NONE},
+    content_len{0}
 {
-    // allocate events
-    read_evt.reset(new_read_event(fd, Client::recv_msg, this));
-    write_evt.reset(new_write_event(fd, Client::send_msg, this));
-    if (!filebuf) {
-        filebuf_from_pool = true;
-        filebuf = free_filebufs.front();
-        free_filebufs.pop();
-    }
+    read_evt = new_read_event(fd, Client::recv_msg, this);
+    write_evt = new_write_event(fd, Client::send_msg, this);
+    filebuf = free_filebufs.front();
+    free_filebufs.pop();
 }
 
 Client::~Client() {
-    LOG1("Connection closed: %s\n", addr.c_str());
+    LOG1("Connection closed: [%s]\n", addr.c_str());
     close(event_get_fd(read_evt));
-    event_del(read_evt);
-    event_del(write_evt);
-    if (filebuf_from_pool) {
-        free_filebufs.push(filebuf);
-    }
+    del_event(read_evt);
+    del_event(write_evt);
+    free_event(read_evt);
+    free_event(write_evt);
+    free_filebufs.push(filebuf);
 }
 
 bool Client::check_request_completed(int last_read_count) {
     // if (req_type == RequestType::NONE) {
         // filebuf->parse_request_type();
     // }
+    if (last_read_count == 5) return true;
     return false;
 
     // TODO: when it sees CRLF, it sets content_len if request type has body (beware of overflow)
 }
 
-void Client::accept_connection(int master_sock, short flag, void* arg) {
+void Client::accept_connection(int master_sock, short/*flag*/, void*/*arg*/) {
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
     int sock = accept(master_sock, (struct sockaddr*)&addr, &addr_len);
@@ -133,19 +139,19 @@ void Client::accept_connection(int master_sock, short flag, void* arg) {
         ERROR_EXIT("Cannot make socket nonblocking");
     }
     if (free_filebufs.empty()) {
-        ERROR("Max connection %d reached", MAX_CONNECTIONS);
-        shared_ptr<Client> client(new Client(sock, addr, make_shared<Filebuf>()));
-        init_with_503_file(client->filebuf);  // reply with 503 unavailable
-        event_add(client->write_evt);
-    } else {
-        shared_ptr<Client> client(new Client(sock, addr));
-        event_add(client->read_evt);
-        LOG1("Connected by %s\n", client->addr.c_str());
+        WARNING("Max connection <%d> reached", MAX_CONNECTION);
+        reply_with_503_unavailable(sock);
+        LOG1("Connection closed: [%s]\n", get_host_and_port(addr).c_str());        
+        close(sock);
+        return;
     }
+    Client* client = new Client(sock, addr);
+    add_event(client->read_evt);
+    LOG1("Connected by [%s]\n", client->addr.c_str());
 }
 
-void Client::recv_msg(int fd, short flag, void* arg) {
-    Client* client = (Client*)arg;
+void Client::recv_msg(int fd, short/*flag*/, void* arg) {
+    auto client = (Client*)arg;
     int count = read(fd, read_buffer, sizeof(read_buffer));
     if (count == 0) {
         // premature close
@@ -155,24 +161,26 @@ void Client::recv_msg(int fd, short flag, void* arg) {
         client->~Client();
         return;
     }
-    client->filebuf->write(read_buffer, count);
+#ifdef LOG_LEVEL_2
+    char buf[51];
+    int n = min(count, 50);
+    memcpy(buf, read_buffer, n);
+    buf[n] = '\0';
+    LOG2("[%s] >> '%s'...\n", client->addr.c_str(), remove_newline(buf));
+#endif
+    client->filebuf->store(read_buffer, count);
     if (client->check_request_completed(count)) {
         // start forwarding to server
-        event_del(client->read_evt);  // disable further reads
+        del_event(client->read_evt);  // disable further reads
         client->filebuf->rewind();
-        shared_ptr<Server> server(new Server(client));
-        event_add(server->write_evt);
+        Server* server = new Server(client);
+        add_event(server->write_evt);
     }
-#ifdef LOG_LEVEL_2
-    char* str = strndup(read_buffer, min(count, 50));
-    LOG2("[%-21s] Client::recv: %s\n", client->addr.c_str(), str);
-    free(str);
-#endif
 }
 
-void Client::send_msg(int fd, short flag, void* arg) {
-    Client* client = (Client*)arg;
-    int count = client->filebuf->read(read_buffer, sizeof(read_buffer));
+void Client::send_msg(int fd, short/*flag*/, void* arg) {
+    auto client = (Client*)arg;
+    int count = client->filebuf->fetch(read_buffer, sizeof(read_buffer));
     if (count <= 0) {
         // done replying
         if (client->server) {
@@ -183,28 +191,31 @@ void Client::send_msg(int fd, short flag, void* arg) {
     }
     write(fd, read_buffer, count);
 #ifdef LOG_LEVEL_2
-    char* str = strndup(read_buffer, min(count, 50));
-    LOG2("[%-21s] Client::send: %s\n", client->addr.c_str(), str);
-    free(str);
+    char buf[51];
+    int n = min(count, 50);
+    memcpy(buf, read_buffer, n);
+    buf[n] = '\0';
+    LOG2("[%s] << '%s'...\n", client->addr.c_str(), remove_newline(buf));
 #endif
 }
 
 Server::Server(Client* _client): client{_client}, filebuf{_client->filebuf} {
-    int sock = connectTCP(Server::address, Server::port);
+    int sock = connect_TCP(Server::address, Server::port);
     if (evutil_make_socket_nonblocking(sock) < 0) {
         ERROR_EXIT("Cannot make socket nonblocking");
     }
-    // allocate events
-    read_evt.reset(new_read_event(sock, Server::recv_msg_and_reply, this));
-    write_evt.reset(new_write_event(sock, Server::send_msg, this));
+    LOG2("Connected to [SERVER] (active: %d)\n", ++Server::connection_count);
+    read_evt = new_read_event(sock, Server::recv_msg, this);
+    write_evt = new_write_event(sock, Server::send_msg, this);
 }
 
 Server::~Server() {
-    LOG2("Connection closed: %s:%hu\n", Server::address, Server::port);
+    LOG2("Connection closed: [SERVER] (active: %d)\n", --Server::connection_count);
     close(event_get_fd(read_evt));
-    event_del(read_evt);
-    event_del(write_evt);
-    filebuf.reset(NULL);
+    del_event(read_evt);
+    del_event(write_evt);
+    free_event(read_evt);
+    free_event(write_evt);
 }
 
 bool Server::check_response_completed(int last_read_count) {
@@ -212,53 +223,48 @@ bool Server::check_response_completed(int last_read_count) {
     char res[digits];
 
     // TODO: detect transfer encoding first
+
+    if (last_read_count == 5) return true;
     return false;
 
     if (content_len == 0) {  // not yet parsed
         filebuf->search_header_membuf("\r\nContent-Length:", res);
         content_len = atoi(res);
     }
-    if (content_len > 0 && filebuf->write_count ??? == content_len) {
+    if (content_len > 0 && filebuf->data_size /*???*/ == content_len) {
         // TODO: new header_len member?
         return true;
     }
     return false;
 }
 
-void Server::send_msg(int fd, short flag, void* arg) {
-    Server* server = (Server*)arg;
-    int count = server->filebuf->read(read_buffer, sizeof(read_buffer));
+void Server::send_msg(int fd, short/*flag*/, void* arg) {
+    auto server = (Server*)arg;
+    int count = server->filebuf->fetch(read_buffer, sizeof(read_buffer));
     if (count <= 0) {
         // done forwarding
-        event_del(server->write_evt);
+        del_event(server->write_evt);
         server->filebuf->clear();
-        event_add(server->read_evt);
+        add_event(server->read_evt);
     }
     write(fd, read_buffer, count);
-    LOG2("[%-21s] Server::send: %d\n", "-", count);
+    LOG2("%11d bytes >> [SERVER]\n", count);
 }
 
-void Server::recv_msg(int fd, short flag, void* arg) {
-    Server* server = (Server*)arg;
+void Server::recv_msg(int fd, short/*flag*/, void* arg) {
+    auto server = (Server*)arg;
+    auto client = server->client;
     int count = read(fd, read_buffer, sizeof(read_buffer));
-    server->filebuf->write(read_buffer, count);
+    server->filebuf->store(read_buffer, count);
+    LOG2("%11d bytes << [SERVER]\n", count);
+
     if (count == 0 || server->check_response_completed(count)) {
         // start replying to client
-        event_del(server->read_evt);
+        del_event(server->read_evt);
         server->filebuf->rewind();
         server->~Server();  // destroy server
-        event_add(client->write_evt);
-    }
-    LOG2("[%-21s] Server::recv: %d\n", "-", count);
-}
-
-void init_with_503_file(shared_ptr<Filebuf> filebuf) {
-    char* header = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\n\r\n";
-    filebuf.write(header, strlen(header));
-    int fd = open("503.html", O_RDONLY);
-    int n;
-    while ((n = read(fd, read_buffer, sizeof(read_buffer))) > 0) {
-        filebuf.write(read_buffer, n);
+        client->server = NULL;
+        add_event(client->write_evt);
     }
 }
 
@@ -271,14 +277,30 @@ void raise_open_file_limit(unsigned long value) {
     if (lim.rlim_max < value) {
         ERROR_EXIT("Please raise hard limit of RLIMIT_NOFILE above %lu", value);
     }
-    LOG2("Raising RLIMIT_NOFILE: %d -> %d\n", lim.rlim_cur, value);
+    LOG2("Raising RLIMIT_NOFILE: %lu -> %lu\n", lim.rlim_cur, value);
     lim.rlim_cur = value;
     if (setrlimit(RLIMIT_NOFILE, &lim) < 0) {
         ERROR_EXIT("Cannot setrlimit")
     }
 }
 
-int passiveTCP(unsigned short port, int qlen) {
+int reply_with_503_unavailable(int sock) {
+    // copy header
+    const char* head = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\n\r\n";
+    char* ptr = read_buffer;
+    strncpy(ptr, head, sizeof(read_buffer));
+    ptr += strlen(head);
+    // copy body from file
+    int fd = open("503.html", O_RDONLY);
+    int n;
+    while ((n = read(fd, ptr, sizeof(read_buffer) - (ptr - read_buffer))) > 0) {
+        ptr += n;
+    }
+    close(fd);
+    return write(sock, read_buffer, ptr - read_buffer);
+}
+
+int passive_TCP(unsigned short port, int qlen) {
     struct sockaddr_in addr;
     int sockFd;
 
@@ -299,7 +321,7 @@ int passiveTCP(unsigned short port, int qlen) {
     return sockFd;
 }
 
-int connectTCP(const char* host, unsigned short port) {
+int connect_TCP(const char* host, unsigned short port) {
     struct sockaddr_in addr;
     struct addrinfo* info;
     int sockFd;
@@ -318,7 +340,7 @@ int connectTCP(const char* host, unsigned short port) {
     if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {  // TODO(davidhcefx): non-blocking connect
         ERROR_EXIT("Cannot connect to %s:%d", get_host(addr), get_port(addr));
     }
-    LOG2("Connected to %s:%d\n", get_host(addr), get_port(addr));
+    // LOG2("Connected to %s:%d\n", get_host(addr), get_port(addr));
     return sockFd;
 }
 
@@ -335,15 +357,21 @@ int main(int argc, char* argv[]) {
     unsigned short port = (argc >= 4) ? atoi(argv[3]) : 8080;
 
     raise_open_file_limit(MAX_FILE_DES);
-    int master_sock = passiveTCP(port);  // fd should be 3
+    int master_sock = passive_TCP(port);  // fd should be 3
     for (int i = 0; i < MAX_FILEBUF; i++) {
         free_filebufs.push(make_shared<Filebuf>());
     }
-    assert(master_sock == 3 && free_filebufs.back()->get_fd() == FILEBUF_LAST_FD);
-    event_add(new_read_event(master_sock, Client::accept_connection));
-    if (event_base_dispatch(evt_base) < 0) {
+    assert(master_sock == 3 && free_filebufs.back()->get_fd() == 3 + MAX_FILEBUF);
+
+    evt_base = event_base_new();
+    add_event(new_read_event(master_sock, Client::accept_connection));
+    if (signal(SIGINT, break_event_loop) == SIG_ERR) {
+        ERROR_EXIT("Cannot setup signal");
+    }
+    if (event_base_dispatch(evt_base) < 0) {  // blocking
         ERROR_EXIT("Cannot dispatch event");
     }
-
+    event_base_foreach_event(evt_base, close_event_connection, NULL);
+    event_base_free(evt_base);
     return 0;
 }

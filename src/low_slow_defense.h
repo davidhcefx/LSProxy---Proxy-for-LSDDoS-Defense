@@ -5,6 +5,7 @@
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
+#include <signal.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/resource.h>
@@ -17,29 +18,35 @@
 #include <string>
 #include <memory>
 #include <queue>
-#define MAX_CONNECTIONS     655  // 36     // adjust it if needed
-#define MAX_FILEBUF         MAX_CONNECTIONS
-#define MAX_HEADER_SIZE     8 * 1024   // 8 KB
-#define MAX_BODY_SIZE       ULONG_MAX  // 2^64 B
-#define ERROR(fmt, ...)     {fprintf(stderr, fmt ": %s\n", __VA_ARGS__, strerror(errno));}
-#define ERROR_EXIT(...)     {ERROR(__VA_ARGS__); exit(1)}
+#include <algorithm>
+#define MAX_CONNECTION  655//36    // adjust it if needed // TODO: automatically setup
+#define MAX_FILEBUF     MAX_CONNECTION
+#define MAX_FILE_DES    3 * MAX_CONNECTION + 3
+#define MAX_HEADER_SIZE 8 * 1024   // 8 KB
+#define MAX_BODY_SIZE   ULONG_MAX  // 2^64 B
 #define LOG_LEVEL_1
 #define LOG_LEVEL_2
 #ifdef  LOG_LEVEL_1
-#define LOG1(...)           {printf(__VA_ARGS__);}
+#define LOG1(...)         {printf(__VA_ARGS__);}
 #else
-#define LOG1(...)           {}
+#define LOG1(...)         {}
 #endif  // LOG_LEVEL_1
 #ifdef  LOG_LEVEL_2
-#define LOG2(...)           {printf(__VA_ARGS__);}
+#define LOG2(...)         {printf(__VA_ARGS__);}
 #else
-#define LOG2(...)           {}
+#define LOG2(...)         {}
 #endif  // LOG_LEVEL_2
+#define WARNING(fmt, ...) {fprintf(stderr, "[Warning] " fmt "\n" __VA_OPT__(,) \
+                                   __VA_ARGS__);}
+#define ERROR(fmt, ...)   {fprintf(stderr, "[Error] " fmt ": %s\n" __VA_OPT__(,) \
+                                   __VA_ARGS__, strerror(errno));}
+#define ERROR_EXIT(...)   {ERROR(__VA_ARGS__); exit(1);}
 using std::string;
 using std::to_string;
 using std::shared_ptr;
 using std::make_shared;
 using std::queue;
+using std::min;
 
 /**
  * SPEC:
@@ -51,10 +58,10 @@ using std::queue;
  *    perform action on it (eg. drop).
  * - Event-based architecture, supporting more than 65535 simultanous connections.
  *
- * File Descriptors: (n = MAX_CONNECTIONS)
- *  0 ~ 3       stdin/stdout/stderr, master_sock
- *  4 ~ n+3     filebuf
- *  n+4 ~ 3n+3  client/server sockets (each connection can has at most 3 Fds)
+ * File Descriptors: (n = MAX_CONNECTION)
+ *  0 ~ 3       stdin, stdout, stderr, master_sock
+ *  4 ~ n+3     filebuf (one per connection)
+ *  n+4 ~ 3n+3  client & server sockets (1-2 per connection)
  */
 
 
@@ -68,16 +75,16 @@ namespace RequestType {
 /* class for using memory and file as buffer */
 class Filebuf {
  public:
-    int write_count;
+    int data_size;
 
     Filebuf();
     ~Filebuf();
     int get_fd() {return fd;}
-    // data might be lost upon failure of writing to the file
-    void write(const char* buffer, int num);
-    // print warning message if failed
-    int read(char* buffer, int size);
-    // rewind all cursors
+    // upon disk failure, expect delays or data loss
+    void store(const char* data, int size);
+    // print warning message if file-reading failed
+    int fetch(char* result, int max_size);
+    // rewind content cursor
     void rewind();
     // clear contents and rewind
     void clear();
@@ -98,54 +105,54 @@ class Filebuf {
 
 class Server;
 
-/* class for processing client requests */
+/* class for handling client connections */
 class Client {
  public:
     string addr;
-    shared_ptr<struct event> read_evt;
-    shared_ptr<struct event> write_evt;
-    shared_ptr<Server> server;   // the associated server
+    struct event* read_evt;  // both have arg keep track of *this
+    struct event* write_evt;
+    shared_ptr<Filebuf> filebuf;
+    Server* server;          // the associated server
 
-    // allocate filebuf
-    Client(int fd, const struct sockaddr_in& _addr, shared_ptr<Filebuf> _filebuf = NULL);
-    // close socket, remove the events and release filebuf
+    // create events and allocate filebuf
+    Client(int fd, const struct sockaddr_in& _addr);
+    // close socket, delete events and release filebuf
     ~Client();
     // check CRLF, transfer-encoding or content-length  // TODO: transfer-encoding
     bool check_request_completed(int last_read_count);
     // creates an instance and add read event
-    static void accept_connection(int master_sock, short flag, void* arg);
+    static void accept_connection(int master_sock, short/*flag*/, void*/*arg*/);
     // recv to buffer; fires up connection with server once request completed
-    static void recv_msg(int fd, short flag, void* arg);
+    static void recv_msg(int fd, short/*flag*/, void* arg);
     // free instance after finished
-    static void send_msg(int fd, short flag, void* arg);
+    static void send_msg(int fd, short/*flag*/, void* arg);
 
  private:
     RequestType::Type req_type;
     unsigned long int content_len;  // TODO: Transfer-Encoding ??
-    shared_ptr<Filebuf> filebuf;
-    bool filebuf_from_pool;  // whether filebuf is allocated from pool
 };
 
 
-/* class for processing server responses */
+/* class for handling server connections */
 class Server {
  public:
-    static char* address;        // the server to be protected
-    static unsigned short port;  // the server to be protected
-    shared_ptr<struct event> read_evt;
-    shared_ptr<struct event> write_evt;
-    shared_ptr<Client> client;   // the associated client
+    static char* address;         // the server to be protected
+    static unsigned short port;   // the server to be protected
+    static int connection_count;  // number of active connections
+    struct event* read_evt;       // both have arg keep track of *this
+    struct event* write_evt;
+    Client* client;               // the associated client
 
-    // creates connection
+    // creates connection and events
     explicit Server(Client* _client);
-    // close socket and remove the events
+    // close socket and delete the events
     ~Server();
     // check for content-length   // TODO: or what?
     bool check_response_completed(int last_read_count);
     // send from buffer; clears buffer for response after finished
-    static void send_msg(int fd, short flag, void* arg);
+    static void send_msg(int fd, short/*flag*/, void* arg);
     // recv to buffer; response to client after finished
-    static void recv_msg(int fd, short flag, void* arg);
+    static void recv_msg(int fd, short/*flag*/, void* arg);
 
     // TODO: cut off connection or something to deal with keep-alive
 
@@ -154,6 +161,12 @@ class Server {
     shared_ptr<Filebuf> filebuf;  // the same filebuf as client's
 };
 
+
+inline char* remove_newline(char* str) {
+    char* ptr = strchr(str, '\n');
+    if (ptr) *ptr = '\0';
+    return str;
+}
 
 inline char* get_host(const struct sockaddr_in& addr) {
     return inet_ntoa(addr.sin_addr);
@@ -172,11 +185,11 @@ inline int make_file_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// fill filebuf with contents of '503.html'
-void init_with_503_file(shared_ptr<Filebuf> filebuf);
-
 // raise system-wide RLIMIT_NOFILE
 void raise_open_file_limit(unsigned long value);
+
+// reply with contents of '503.html' and return num of bytes written
+int reply_with_503_unavailable(int sock);
 
 extern struct event_base* evt_base;
 inline struct event* new_read_event(int fd, event_callback_fn cb, void* arg = NULL) {
@@ -187,30 +200,36 @@ inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = N
     return event_new(evt_base, fd, EV_WRITE | EV_PERSIST, cb, arg);
 }
 
-inline void event_add(struct event* evt) {
+inline void add_event(struct event* evt) {
     if (event_add(evt, NULL) < 0) {
         ERROR_EXIT("Cannot add event");
     }
 }
 
-inline void event_add(const shared_ptr<struct event>& evt) {
-    event_add(evt.get());
-}
-
-inline void event_del(struct event* evt) {
+inline void del_event(struct event* evt) {
     if (event_del(evt) < 0) {
         ERROR_EXIT("Cannot del event");
     }
 }
 
-inline void event_del(const shared_ptr<struct event>& evt) {
-    event_del(evt.get());
+inline void free_event(struct event* evt) {
+    event_free(evt);
 }
 
 // return master socket Fd
-int passiveTCP(unsigned short port, int qlen = 128)
+int passive_TCP(unsigned short port, int qlen = 128);
 
 // return socket Fd; host can be either hostname or IP address.
-int connectTCP(const char* host, unsigned short port);
+int connect_TCP(const char* host, unsigned short port);
+
+void break_event_loop(int/*sig*/) {
+    event_base_loopbreak(evt_base);
+}
+
+int close_event_connection(const struct event_base*/*base*/,
+                           const struct event* evt, void*/*arg*/) {
+    close(event_get_fd(evt));
+    return 0;
+}
 
 #endif  // SRC_LOW_SLOW_DEFENSE_H_
