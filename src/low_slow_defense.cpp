@@ -10,7 +10,7 @@ unsigned short Server::port;
 int Server::connection_count = 0;
 
 
-Filebuf::Filebuf(): data_size{0}, cur_pos{0} {
+Filebuf::Filebuf(): data_size{0}, next_pos{0} {
     buffer[0] = '\0';
     char name[] = "/tmp/low_slow_buf_XXXXXX";
     if ((fd = mkstemp(name)) < 0) {
@@ -20,7 +20,7 @@ Filebuf::Filebuf(): data_size{0}, cur_pos{0} {
         ERROR_EXIT("Cannot make file nonblocking");
     }
     file_name = string(name);
-    LOG2("filebuf (%d): %s\n", fd, name);
+    LOG2("#%d = '%s'\n", fd, name);
 }
 
 Filebuf::~Filebuf() {
@@ -28,41 +28,24 @@ Filebuf::~Filebuf() {
 }
 
 void Filebuf::store(const char* data, int size) {
-    // TODO: new version
-
-    memcpy(buffer, data, ??)
-    sizeof(buffer)
-    buffer
-
-    int remain = size;
-    for (int i = 0; i < 10 && remain > 0; i++) {  // try 10 times
-        int count = write(fd, data, remain);
-        if (count > 0) {
-            remain -= count;
-        } else if (errno != EAGAIN && errno != EINTR) {  // not blocking nor interrupt
-            ERROR("Write failed");
-            usleep(100);  // wait for 100us
-        }
+    int count = _buf_write(data, size);
+    size -= count;
+    if (size > 0) [[unlikely]] {
+        _file_write(data + count, size);
     }
-    if (remain > 0) {
-        WARNING("%d bytes could not be written and were lost", remain);
-    }
-    data_size += size - remain;
-    LOG2("Wrote %d bytes to %s\n", size - remain, file_name.c_str());
 }
 
 int Filebuf::fetch(char* result, int max_size) {
-    // TODO: new version
-
-    int count = read(fd, result, max_size);
-    if (count < 0) {
-        ERROR("Read failed (%s)", file_name.c_str());
+    int count = _buf_read(result, max_size);
+    if (count > 0) [[likely]] {
+        return count;
+    } else {
+        return _file_read(result, max_size);
     }
-    return count;
 }
 
 void Filebuf::rewind() {
-    cur_pos = 0;
+    next_pos = 0;
     if (lseek(fd, 0, SEEK_SET) < 0) {
         ERROR_EXIT("Cannot lseek");
     }
@@ -74,7 +57,7 @@ void Filebuf::clear() {
         if (errno == EINTR && ftruncate(fd, 0) == 0) {  // if interrupted
             // pass
         } else {
-            ERROR_EXIT("Cannot truncate file %s", file_name.c_str());
+            ERROR_EXIT("Cannot truncate file '%s'", file_name.c_str());
         }
     }
     rewind();
@@ -99,6 +82,84 @@ void Filebuf::search_header_membuf(const char* crlf_header_name, char* result) {
     int count = end - start;
     memcpy(result, start, count);
     result[count] = '\0';
+}
+
+inline int Filebuf::_buf_remaining_space() {
+    if (next_pos < MAX_HEADER_SIZE) [[likely]] {
+        return MAX_HEADER_SIZE - next_pos;
+    } else {
+        return 0;
+    }
+}
+
+inline int Filebuf::_buf_unread_data_size() {
+    return min(data_size, MAX_HEADER_SIZE) - next_pos;
+}
+
+int Filebuf::_buf_write(const char* data, int size) {
+    int space = _buf_remaining_space();
+    if (space > 0) [[likely]] {
+        size = min(size, space);
+        memcpy(buffer + next_pos, data, size);
+        next_pos += size;
+        data_size += size;
+        LOG2("Buffer occupied %d bytes out of %d\n", size, space);
+        return size;
+    } else {
+        return 0;
+    }
+}
+
+// size should not exceed remaining space
+// inline void Filebuf::_buf_write(const char* data, int size) {
+//     memcpy(buffer + next_pos, data, size);
+//     data_size += size;
+//     next_pos += size;
+// }
+
+int Filebuf::_buf_read(char* result, int max_size) {
+    int size = _buf_unread_data_size();
+    if (size > 0) [[likely]] {
+        size = min(size, max_size);
+        memcpy(result, buffer + next_pos, size);
+        next_pos += size;
+        LOG2("Buffer read %d bytes\n", size);
+        return size;
+    } else {
+        return 0;
+    }
+}
+
+// size should not exceed unread data size
+// inline int Filebuf::_buf_read(char* result, int size) {
+//     memcpy(result, buffer + next_pos, size);
+//     next_pos += size;
+// }
+
+void Filebuf::_file_write(const char* data, int size) {
+    int remain = size;
+    for (int i = 0; i < 10 && remain > 0; i++) {  // try 10 times
+        int count = write(fd, data, remain);
+        if (count > 0) {
+            remain -= count;
+        } else if (errno != EAGAIN && errno != EINTR) {  // not blocking nor interrupt
+            ERROR("Write failed");
+            usleep(100);  // wait for 100us
+        }
+    }
+    if (remain > 0) {
+        WARNING("%d bytes could not be written and were lost", remain);
+    }
+    data_size += size - remain;
+    LOG2("Wrote %d bytes to '%s'\n", size - remain, file_name.c_str());
+}
+
+inline int Filebuf::_file_read(char* result, int max_size) {
+    int count = read(fd, result, max_size);
+    if (count < 0) {
+        ERROR("Read failed '%s'", file_name.c_str());
+    }
+    return count;
 }
 
 Client::Client(int fd, const struct sockaddr_in& _addr):
@@ -166,7 +227,7 @@ void Client::recv_msg(int fd, short/*flag*/, void* arg) {
     int n = min(count, 50);
     memcpy(buf, read_buffer, n);
     buf[n] = '\0';
-    LOG2("[%s] >> '%s'...\n", client->addr.c_str(), remove_newline(buf));
+    LOG2("[%s] >> '%s'...\n", client->addr.c_str(), replace_newlines(buf));
 #endif
     client->filebuf->store(read_buffer, count);
     if (client->check_request_completed(count)) {
@@ -195,7 +256,7 @@ void Client::send_msg(int fd, short/*flag*/, void* arg) {
     int n = min(count, 50);
     memcpy(buf, read_buffer, n);
     buf[n] = '\0';
-    LOG2("[%s] << '%s'...\n", client->addr.c_str(), remove_newline(buf));
+    LOG2("[%s] << '%s'...\n", client->addr.c_str(), replace_newlines(buf));
 #endif
 }
 

@@ -19,10 +19,10 @@
 #include <memory>
 #include <queue>
 #include <algorithm>
-#define MAX_CONNECTION  655//36    // adjust it if needed // TODO: automatically setup
+#define MAX_CONNECTION  6  // 65536    // adjust it if needed // TODO: automatically setup
 #define MAX_FILEBUF     MAX_CONNECTION
 #define MAX_FILE_DES    3 * MAX_CONNECTION + 3
-#define MAX_HEADER_SIZE 8 * 1024   // 8 KB
+#define MAX_HEADER_SIZE 8  // 8 * 1024   // 8 KB
 #define MAX_BODY_SIZE   ULONG_MAX  // 2^64 B
 #define LOG_LEVEL_1
 #define LOG_LEVEL_2
@@ -63,6 +63,13 @@ using std::min;
  *  4 ~ n+3     filebuf (one per connection)
  *  n+4 ~ 3n+3  client & server sockets (1-2 per connection)
  */
+/*
+    [x] Buffer incomple header
+    [ ] Buffer body, start forwarding when almost done
+    [ ] Read attack
+    [ ] Detection and action
+    [x] Event-based arch
+*/
 
 
 namespace RequestType {
@@ -79,27 +86,37 @@ class Filebuf {
 
     Filebuf();
     ~Filebuf();
-    int get_fd() {return fd;}
-    // upon disk failure, expect delays or data loss
+    // store data; upon disk failure, expect delays or data loss
     void store(const char* data, int size);
-    // print warning message if file-reading failed
+    // fetch data; print warning message if file-reading failed
     int fetch(char* result, int max_size);
     // rewind content cursor
     void rewind();
-    // clear contents and rewind
+    // clear content and rewind
     void clear();
+    int get_fd() {return fd;}
     RequestType::Type parse_request_type();
-    // search for header in mem buffer; store value as NULL-terminated string
+    // search for header in mem buffer; store result as NULL-terminated string
     // crlf_header_name: header name with CRLF prepended
     void search_header_membuf(const char* crlf_header_name, char* result);
 
  private:
-    // memory buffer
-    char buffer[MAX_HEADER_SIZE + 1];  // NULL-terminated
-    int cur_pos;
-    // file buffer (storing overflow data)
+    /* Memory buffer */
+    char buffer[MAX_HEADER_SIZE + 1];  // last byte is for '\0'
+    int next_pos;   // next read/write position
+    inline int _buf_remaining_space();
+    inline int _buf_unread_data_size();
+    // return num of bytes written
+    int _buf_write(const char* data, int size);
+    // return num of bytes read
+    int _buf_read(char* result, int max_size);
+
+    /* File buffer (store additional data) */
     int fd;
     string file_name;
+    // retry 10 times with delays before failure
+    void _file_write(const char* data, int size);
+    inline int _file_read(char* result, int max_size);
 };
 
 
@@ -162,9 +179,11 @@ class Server {
 };
 
 
-inline char* remove_newline(char* str) {
-    char* ptr = strchr(str, '\n');
-    if (ptr) *ptr = '\0';
+// replace newlines with dashes
+inline char* replace_newlines(char* str) {
+    for (char* ptr = strchr(str, '\n'); ptr; ptr = strchr(ptr, '\n')) {
+        *ptr = '_';
+    }
     return str;
 }
 
