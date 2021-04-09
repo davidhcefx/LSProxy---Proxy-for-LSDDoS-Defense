@@ -1,4 +1,4 @@
-#include "low_slow_defense.h"
+#include "lowslow_proxy.h"
 
 
 queue<shared_ptr<Filebuf>> free_filebufs;
@@ -12,7 +12,7 @@ int Server::connection_count = 0;
 
 Filebuf::Filebuf(): data_size{0}, next_pos{0} {
     buffer[0] = '\0';
-    char name[] = "/tmp/low_slow_buf_XXXXXX";
+    char name[] = "/tmp/lowslow_buf_XXXXXX";
     if ((fd = mkstemp(name)) < 0) {
         ERROR_EXIT("Cannot mkstemp");
     }
@@ -64,17 +64,67 @@ void Filebuf::clear() {
 }
 
 RequestType::Type Filebuf::parse_request_type() {
+    if (data_size >= 2) {
+        switch (buffer[0]) {
+        case 'C':
+            if (buffer[1] == 'O')
+                return RequestType::CONNECT;
+            break;
+        case 'D':
+            if (buffer[1] == 'E')
+                return RequestType::DELETE;
+            break;
+        case 'G':
+            if (buffer[1] == 'E')
+                return RequestType::GET;
+            break;
+        case 'H':
+            if (buffer[1] == 'E')
+                return RequestType::HEAD;
+            break;
+        case 'O':
+            if (buffer[1] == 'P')
+                return RequestType::OPTIONS;
+            break;
+        case 'T':
+            if (buffer[1] == 'R')
+                return RequestType::TRACE;
+            break;
+        case 'P':
+            if (buffer[1] == 'O')
+                return RequestType::POST;
+            else if (buffer[1] == 'U')
+                return RequestType::PUT;
+            else if (buffer[1] == 'A')
+                return RequestType::PATCH;
+            else
+                break;
+        default:
+            return RequestType::NONE;
+        }
+    }
+    return RequestType::NONE;
+}
+
+int Filebuf::search_double_crlf() {
+    buffer[next_pos] = '\0';  // NULL terminates
+    char* ptr = strstr(buffer, CRLF CRLF);
+    return (ptr) ? ptr - buffer : -1;
+}
+
+void Filebuf::search_header_backward(const char* crlf_header_name, char* result) {
 
 }
 
 void Filebuf::search_header_membuf(const char* crlf_header_name, char* result) {
+    buffer[next_pos] = '\0';  // NULL terminates
     char* start = strstr(buffer, crlf_header_name);
     if (start == NULL) {
         result[0] = '\0';
         return;
     }
     start += strlen(crlf_header_name);
-    char* end = strstr(start, "\r\n");
+    char* end = strstr(start, CRLF);
     if (end == NULL) {
         result[0] = '\0';
         return;
@@ -110,13 +160,6 @@ int Filebuf::_buf_write(const char* data, int size) {
     }
 }
 
-// size should not exceed remaining space
-// inline void Filebuf::_buf_write(const char* data, int size) {
-//     memcpy(buffer + next_pos, data, size);
-//     data_size += size;
-//     next_pos += size;
-// }
-
 int Filebuf::_buf_read(char* result, int max_size) {
     int size = _buf_unread_data_size();
     if (size > 0) [[likely]] {
@@ -129,12 +172,6 @@ int Filebuf::_buf_read(char* result, int max_size) {
         return 0;
     }
 }
-
-// size should not exceed unread data size
-// inline int Filebuf::_buf_read(char* result, int size) {
-//     memcpy(result, buffer + next_pos, size);
-//     next_pos += size;
-// }
 
 void Filebuf::_file_write(const char* data, int size) {
     int remain = size;
@@ -163,8 +200,7 @@ inline int Filebuf::_file_read(char* result, int max_size) {
 }
 
 Client::Client(int fd, const struct sockaddr_in& _addr):
-    addr{get_host_and_port(_addr)}, server{NULL}, req_type{RequestType::NONE},
-    content_len{0}
+    addr{get_host_and_port(_addr)}, server{NULL}, header_len{0}, content_len{0}
 {
     read_evt = new_read_event(fd, Client::recv_msg, this);
     write_evt = new_write_event(fd, Client::send_msg, this);
@@ -183,9 +219,33 @@ Client::~Client() {
 }
 
 bool Client::check_request_completed(int last_read_count) {
-    // if (req_type == RequestType::NONE) {
-        // filebuf->parse_request_type();
-    // }
+    if (header_len == 0) {  // header_len not set
+        int offset = filebuf->search_double_crlf();
+        if (offset == -1) {
+            return false;
+        } else if (offset == 0) {
+            WARNING("Not ")
+            return true;
+        }
+        header_len = offset;
+    }
+    if (content_len == 0) {  // content_len not set
+        constexpr int digits = log10(MAX_BODY_SIZE) + 3;
+        char res[digits];
+        filebuf->search_header(CRLF "Content-Length:", res, header_len);
+        content_len = atoi(res);  // TODO: atoi ?
+        if (content_len == 0) {  // no Content-Length
+            return true;
+        }
+    }
+    // TODO: transfer encoding?
+
+    if (content_len + header_len == data_size)
+
+    if (content_len == 0) {
+        return true;
+    } else if (filebuf->data_size - )
+
     if (last_read_count == 5) return true;
     return false;
 
@@ -280,6 +340,9 @@ Server::~Server() {
 }
 
 bool Server::check_response_completed(int last_read_count) {
+    // TODO: HEAD method can has content-length, but no body
+    // TODO: 304 Not Modified can has transfer-encoding, but no body
+
     constexpr int digits = log10(MAX_BODY_SIZE) + 3;
     char res[digits];
 
@@ -289,7 +352,7 @@ bool Server::check_response_completed(int last_read_count) {
     return false;
 
     if (content_len == 0) {  // not yet parsed
-        filebuf->search_header_membuf("\r\nContent-Length:", res);
+        filebuf->search_header_membuf(CRLF "Content-Length:", res);
         content_len = atoi(res);
     }
     if (content_len > 0 && filebuf->data_size /*???*/ == content_len) {
@@ -352,7 +415,7 @@ int reply_with_503_unavailable(int sock) {
     strncpy(ptr, head, sizeof(read_buffer));
     ptr += strlen(head);
     // copy body from file
-    int fd = open("503.html", O_RDONLY);
+    int fd = open("utils/503.html", O_RDONLY);   // TODO: test this!
     int n;
     while ((n = read(fd, ptr, sizeof(read_buffer) - (ptr - read_buffer))) > 0) {
         ptr += n;

@@ -1,18 +1,19 @@
 DISTRO := $(shell sed -n -E 's/^NAME="(.*)"/\1/p' /etc/*release)
 CPP := $(shell if command -v g++-8 >/dev/null 2>&1; then echo 'g++-8'; else echo 'g++'; fi)
-OPTS := -Wall -Wextra -std=gnu++2a # -O2
+#OPTS := -Wall -Wextra -std=gnu++2a -O2
+OPTS := -Wall -Wextra -std=gnu++2a
 
 
-all: gnu++2a attack defense
+all: gnu++2a simple_attack lowslow_proxy
 
-attack:
-	$(CPP) $(OPTS) src/low_slow_attack.cpp -o low_slow_attack
+simple_attack:
+	$(CPP) $(OPTS) src/simple_attack.cpp -o $@
 
-defense: libevent raise_limit
-	$(CPP) $(OPTS) -levent src/low_slow_defense.cpp -o low_slow_defense
+lowslow_proxy: raise_limit libevent
+	$(CPP) $(OPTS) -levent src/lowslow_proxy.cpp src/llhttp/libllhttp.so -o $@
 
 raise_limit:
-	/bin/bash raise_nofile_limit.sh
+	/bin/bash utils/raise_nofile_limit.sh
 
 gnu++2a:
 	# check if -std=gnu++2a is supported
@@ -45,4 +46,4 @@ libevent:
 	fi
 
 clean:
-	rm -f low_slow_attack low_slow_defense
+	rm -f simple_attack lowslow_proxy

@@ -1,5 +1,5 @@
-#ifndef SRC_LOW_SLOW_DEFENSE_H_
-#define SRC_LOW_SLOW_DEFENSE_H_
+#ifndef SRC_LOWSLOW_PROXY_H_
+#define SRC_LOWSLOW_PROXY_H_
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +24,7 @@
 #define MAX_FILE_DES    3 * MAX_CONNECTION + 3
 #define MAX_HEADER_SIZE 8  // 8 * 1024   // 8 KB
 #define MAX_BODY_SIZE   ULONG_MAX  // 2^64 B
+#define CRLF            "\r\n"
 #define LOG_LEVEL_1
 #define LOG_LEVEL_2
 #ifdef  LOG_LEVEL_1
@@ -74,9 +75,12 @@ using std::min;
 
 namespace RequestType {
     enum Type {  // request has body if and only if value >= 100
-        NONE, GET, HEAD, DELETE, CONNECT, OPTIONS, TRACE,
+        NONE, CONNECT, DELETE, GET, HEAD, OPTIONS, TRACE,
         POST = 100, PUT, PATCH
     };
+    bool has_body(Type req_type) {
+        return req_type >= 100;
+    }
 }
 
 /* class for using memory and file as buffer */
@@ -95,14 +99,18 @@ class Filebuf {
     // clear content and rewind
     void clear();
     int get_fd() {return fd;}
-    RequestType::Type parse_request_type();
+    // return NONE if can't recognize or not having enough info
+    // RequestType::Type parse_request_type();
+
+    // return the offset if found, else -1
+    int search_double_crlf();
     // search for header in mem buffer; store result as NULL-terminated string
     // crlf_header_name: header name with CRLF prepended
     void search_header_membuf(const char* crlf_header_name, char* result);
 
  private:
     /* Memory buffer */
-    char buffer[MAX_HEADER_SIZE + 1];  // last byte is for '\0'
+    char buffer[MAX_HEADER_SIZE + 1];  // last byte don't store data
     int next_pos;   // next read/write position
     inline int _buf_remaining_space();
     inline int _buf_unread_data_size();
@@ -135,7 +143,8 @@ class Client {
     Client(int fd, const struct sockaddr_in& _addr);
     // close socket, delete events and release filebuf
     ~Client();
-    // check CRLF, transfer-encoding or content-length  // TODO: transfer-encoding
+    // check if Content-Length or Transfer-Encoding completed
+    // if it has neither, check if double CRLF arrived
     bool check_request_completed(int last_read_count);
     // creates an instance and add read event
     static void accept_connection(int master_sock, short/*flag*/, void*/*arg*/);
@@ -145,8 +154,9 @@ class Client {
     static void send_msg(int fd, short/*flag*/, void* arg);
 
  private:
-    RequestType::Type req_type;
-    unsigned long int content_len;  // TODO: Transfer-Encoding ??
+    // RequestType::Type req_type;
+    unsigned header_len;
+    unsigned long content_len;  // TODO: Transfer-Encoding ??
 };
 
 
@@ -185,6 +195,10 @@ inline char* replace_newlines(char* str) {
         *ptr = '_';
     }
     return str;
+}
+
+inline bool icase_match(const char ch, char target) {
+    return ch == toupper(target) || ch == tolower(target);
 }
 
 inline char* get_host(const struct sockaddr_in& addr) {
@@ -251,4 +265,4 @@ int close_event_connection(const struct event_base*/*base*/,
     return 0;
 }
 
-#endif  // SRC_LOW_SLOW_DEFENSE_H_
+#endif  // SRC_LOWSLOW_PROXY_H_
