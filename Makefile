@@ -1,19 +1,20 @@
 DISTRO := $(shell sed -n -E 's/^NAME="(.*)"/\1/p' /etc/*release)
 CPP := $(shell if command -v g++-8 >/dev/null 2>&1; then echo 'g++-8'; else echo 'g++'; fi)
-#OPTS := -Wall -Wextra -std=gnu++2a -O2
-OPTS := -Wall -Wextra -std=gnu++2a
+#CPPFLAGS := -Wall -Wextra -std=gnu++2a -O2
+CPPFLAGS := -Wall -Wextra -std=gnu++2a
+BINARIES := simple_attack ls_proxy
 
 
-all: gnu++2a simple_attack lowslow_proxy
+all: gnu++2a $(BINARIES)
 
 simple_attack:
-	$(CPP) $(OPTS) src/simple_attack.cpp -o $@
+	$(CPP) $(CPPFLAGS) src/simple_attack.cpp -o $@
 
-lowslow_proxy: raise_limit libevent
-	$(CPP) $(OPTS) -levent src/lowslow_proxy.cpp src/llhttp/libllhttp.so -o $@
+ls_proxy: libevent raise_limit
+	$(CPP) $(CPPFLAGS) -levent src/ls_proxy.cpp src/llhttp/libllhttp.so -o $@
 
 raise_limit:
-	/bin/bash utils/raise_nofile_limit.sh
+	./utils/raise_nofile_limit.sh
 
 gnu++2a:
 	# check if -std=gnu++2a is supported
@@ -46,4 +47,6 @@ libevent:
 	fi
 
 clean:
-	rm -f simple_attack lowslow_proxy
+	rm -f $(BINARIES)
+
+.PHONY: all clean raise_limit gnu++2a libevent

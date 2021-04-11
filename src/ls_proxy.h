@@ -1,9 +1,6 @@
-#ifndef SRC_LOWSLOW_PROXY_H_
-#define SRC_LOWSLOW_PROXY_H_
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <limits.h>
+#ifndef SRC_LS_PROXY_H_
+#define SRC_LS_PROXY_H_
+#include "llhttp/llhttp.h"
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -13,8 +10,12 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <event2/event.h>
-#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <cassert>
+#include <climits>
+#include <cmath>
 #include <string>
 #include <memory>
 #include <queue>
@@ -50,27 +51,42 @@ using std::queue;
 using std::min;
 
 /**
- * SPEC:
- * - Buffer incomplete header (by mem/file), and forward it afterwards.
- * - Buffer body. Start forwarding process when almost done receiving it. If the
- *    final part didn't arrive within a timeout, reset the connection with server.
- * - [TODO] read attack???
- * - Detect malicious connection by some rules (eg. Transfer Rate), and then
- *    perform action on it (eg. drop).
- * - Event-based architecture, supporting more than 65535 simultanous connections.
+ * SPECIFICATION:
+ * > Every connection initially starts in fast-mode. It can be put into slow-mode
+ *   if we found it suspicious, but not the reverse.
+ * > In fast-mode, we forward packages directly. A buffer might be used for storing
+ *   temporary data that cannot be forwarded.
+ * > In slow-mode, we forward requests one at a time and close server connection after
+ *   each response. We receive the entire response before sending back to prevent read
+ *   LSDDoS attacks.
+ *   - Instead of closing it right away, we can maintain a free-server pool for speedup,
+ *     but that's complicated.
+ *   - Use event-based architecture to prevent proxy itself from LSDDoS.
+ * > We monitor transfer rate periodically, whether in every certain time or every
+ *   certain bytes received. (The period should be short, for it opens up a window
+ *   for DoS attack)
+ *   - [Future work] Monitor more metrics for better accuracy.
+ * > If we find a connection suspicious, we first disable its write to server, and close
+ *   server connection entirely after a short delay to collect remaining responses. After
+ *   putting the connection into slow-mode, we continue its request collection progress.
+ * > We keep a temporary copy for each received requests, and clear them once request
+ *   completed.
+ * > To prevent legitimate connections from been recognized as suspicious, we set
+ *   keep-alive timeout short, and close client connection when timeout.
+ *   - Injecting a 'Keep-Alive: timeout' header could prevent TCP reset issues, but
+ *     would mess up with the original response.
  *
- * File Descriptors: (n = MAX_CONNECTION)
+ * [ ] For large http body, start forwarding earlier to speed up. But if the
+ *     remaining part didn't arrive within a timeout, reset server connection.
+ *     Let time_c and time_s be the ETA for the body to travel from client to
+ *     proxy and proxy to server resp. We can start fwd around time_c - time_s.
+ *
+ *
+ * FILE DESCRIPTORS: (n=MAX_CONNECTION)
  *  0 ~ 3       stdin, stdout, stderr, master_sock
  *  4 ~ n+3     filebuf (one per connection)
  *  n+4 ~ 3n+3  client & server sockets (1-2 per connection)
  */
-/*
-    [x] Buffer incomple header
-    [ ] Buffer body, start forwarding when almost done
-    [ ] Read attack
-    [ ] Detection and action
-    [x] Event-based arch
-*/
 
 
 namespace RequestType {
@@ -181,7 +197,16 @@ class Server {
     // recv to buffer; response to client after finished
     static void recv_msg(int fd, short/*flag*/, void* arg);
 
-    // TODO: cut off connection or something to deal with keep-alive
+
+    // TODO: cut off keep-alive? keep it to some extend?
+    // "Connections can be closed at any time"
+    // "A client MAY "pipeline" its requests"
+
+    // "To avoid the TCP reset problem, servers typically close a connection
+    // in stages.  First, the server performs a half-close by closing only
+    // the write side of the read/write connection."
+
+    // TODO: detect server down
 
  private:
     unsigned long int content_len;  // TODO: Transfer-Encoding ??
@@ -265,4 +290,4 @@ int close_event_connection(const struct event_base*/*base*/,
     return 0;
 }
 
-#endif  // SRC_LOWSLOW_PROXY_H_
+#endif  // SRC_LS_PROXY_H_

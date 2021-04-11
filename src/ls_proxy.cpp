@@ -1,4 +1,4 @@
-#include "lowslow_proxy.h"
+#include "ls_proxy.h"
 
 
 queue<shared_ptr<Filebuf>> free_filebufs;
@@ -12,7 +12,7 @@ int Server::connection_count = 0;
 
 Filebuf::Filebuf(): data_size{0}, next_pos{0} {
     buffer[0] = '\0';
-    char name[] = "/tmp/lowslow_buf_XXXXXX";
+    char name[] = "/tmp/ls_proxy_buf_XXXXXX";
     if ((fd = mkstemp(name)) < 0) {
         ERROR_EXIT("Cannot mkstemp");
     }

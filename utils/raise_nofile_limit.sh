@@ -1,6 +1,6 @@
 #! /bin/bash
 
-max_connection=65536  # please see lowslow_proxy.h
+max_connection=65536  # please see ls_proxy.h
 value=$((max_connection * 3 + 4))
 conf=/etc/security/limits.conf
 user=$(id -un)
