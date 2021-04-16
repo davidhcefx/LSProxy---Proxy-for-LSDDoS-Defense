@@ -22,11 +22,11 @@
 #include <algorithm>
 #define MAX_CONNECTION    6  // 65536    // adjust it if needed // TODO: automatically setup
 #define MAX_HYBRIDBUF     MAX_CONNECTION
-#define MAX_FILE_DESC     3 * MAX_CONNECTION + 3    // TODO: adjust
-#define MAX_HEADER_SIZE   8  // 8 * 1024   // 8 KB
-#define MAX_BODY_SIZE     ULONG_MAX  // 2^64 B
-#define SOCKET_BUF_SIZE   10240  // 10 KB
-#define CRLF              "\r\n"
+#define MAX_FILE_DESC     5 * MAX_CONNECTION + 3  // see FILE DESCRIPTOR MAP
+// #define MAX_BODY_SIZE     ULONG_MAX  // 2^64 B
+#define SOCK_IO_BUF_SIZE  10  // 10 * 1024  // socket io buffer (KB)
+#define HIST_CACHE_SIZE   8 // 8 * 1024  // in-mem cache for request history (KB)
+// #define CRLF              "\r\n"
 #define LOG_LEVEL_1
 #define LOG_LEVEL_2
 #ifdef  LOG_LEVEL_1
@@ -80,10 +80,11 @@ using std::min;
  *     > Injecting a 'Keep-Alive: timeout' header might prevent TCP reset
  *       issues, but would mess up with the original response.
  *
- * FILE DESCRIPTORS: (n=MAX_CONNECTION)
- *  0 ~ 3       stdin, stdout, stderr, master_sock
- *  4 ~ n+3     filebuf (one per connection)         // TODO: adjust
- *  n+4 ~ 3n+3  client & server sockets (1-2 per connection)
+ * FILE DESCRIPTOR MAP: (n=MAX_CONNECTION)
+ *     0 ~ 3    stdin, stdout, stderr, master_sock
+ *     4 ~ n+3  Hybridbuf for history (one per connection)
+ *   n+4 ~ 3n+3 Client & Server sockets (1-2 per conn)
+ *  3n+4 ~ 5n+3 Filebuf for slow buffers (0-2 per conn)
  *
  * Progress:
  * [x] Event-based arch.
@@ -97,7 +98,15 @@ using std::min;
  */
 
 
-/* Using a file as buffer */
+struct io_stat {
+    int nbytes;    // number of bytes actually read/written
+    bool has_error;
+    bool has_eof;  // when read returns 0
+    io_stat(): nbytes{0}, has_error{false}, has_eof{false} {}
+};
+
+
+/* class for using a file as buffer */
 class Filebuf {
  public:
     int data_size;
@@ -105,10 +114,11 @@ class Filebuf {
     Filebuf();
     ~Filebuf() {close(fd);}
     // upon disk failure, expect delays or data loss
+    // storing before clearing content will cause undefined behavior
     virtual inline void store(const char* data, int size) {_file_write(data, size);}
-    // print warning message when failed
+    // print error message when failed
     virtual inline int fetch(char* result, int max_size) {_file_read(result, max_size);}
-    // rewind content cursor
+    // rewind content cursor (for further reads)
     virtual inline void rewind() {_file_rewind();}
     // clear content and rewind
     void clear();
@@ -120,13 +130,13 @@ class Filebuf {
     string file_name;
     // retry 10 times with delays before failure
     void _file_write(const char* data, int size);
-    // print warning message and return -1 if failed
+    // print error message and return -1 if failed
     inline int _file_read(char* result, int max_size);
     inline void _file_rewind();
 };
 
 
-/* Using both memory and file as buffer */
+/* class for using both memory and file as buffer */
 class Hybridbuf: public Filebuf {
  public:
     Hybridbuf(): next_pos{0} {};
@@ -140,8 +150,8 @@ class Hybridbuf: public Filebuf {
 
  private:
     /* Memory buffer */
-    char buffer[MAX_HEADER_SIZE + 1];  // last byte don't store data
-    int next_pos;                      // next read/write position
+    char buffer[HIST_CACHE_SIZE];
+    int next_pos;  // next read/write position, range [0, HIST_CACHE_SIZE]
     inline int _buf_remaining_space();
     inline int _buf_unread_data_size();
     int _buf_write(const char* data, int size);
@@ -154,36 +164,41 @@ class Hybridbuf: public Filebuf {
 class Circularbuf {
  public:
     Circularbuf(): start_ptr{0}, end_ptr{0} {}
-    // read as much as possible from fd
-    int read_all(int fd);
-    // write as much as possible to fd
-    int write_all(int fd);
+    // read in as much as possible from fd; set has_eof when eof
+    struct io_stat read_all_from(int fd);
+    // write out as much as possible to fd
+    struct io_stat write_all_to(int fd);
     inline int data_size();
+    // return value in range [0, SOCK_IO_BUF_SIZE)
     inline int remaining_space();
 
  private:
-    char buffer[SOCKET_BUF_SIZE];  // last byte don't store data
-    char* start_ptr;               // points to data start
-    char* end_ptr;                 // points next to data end
+    char buffer[SOCK_IO_BUF_SIZE];  // last byte don't store data
+    char* start_ptr;                // points to data start
+    char* end_ptr;                  // points next to data end
 };
 
 
 class Connection;
 
-/* class for handling client connections */
+/* class for handling client io */
 class Client {
  public:
     string addr;
+    Connection* conn;        // TODO: is it worth using shared_ptr?
     struct event* read_evt;  // both events have ptr keeping track of *this
     struct event* write_evt;
-    Hybridbuf* request_buf;  // request history or slow-mode buf
-    Connection* conn;        // TODO: is it worth using shared_ptr?
+    shared_ptr<Hybridbuf> request_hist;  // incomplete request history
+    Circularbuf* queued_output_f;  // queued output for fast-mode
+    Filebuf* request_buf_s;        // request buffer for slow-mode
+    // TODO: we need a queue-like buffer for slow-mode
     // transfer_rate;
 
-    // create events and allocate Hybridbuf
+    // create the events and allocate Hybridbuf
     Client(int fd, const struct sockaddr_in& _addr, const Connection* _conn);
-    // close socket, delete events and release Hybridbuf
+    // close socket, delete the events and release Hybridbuf
     ~Client();
+    int get_fd() {return event_get_fd(read_evt);}
     // upon completed, forward each request to server one at a time
     void recv_to_buffer_slowly(int fd);
 
@@ -200,21 +215,23 @@ class Client {
 };
 
 
-/* class for handling server connections */
+/* class for handling server io */
 class Server {
  public:
     static char* address;         // the server to be protected
     static unsigned short port;   // the server to be protected
     static int connection_count;  // number of active connections
+    Connection* conn;
     struct event* read_evt;  // both events have ptr keeping track of *this
     struct event* write_evt;
-    Filebuf* response_buf;   // slow-mode buf   // TODO: free
-    Connection* conn;
+    Circularbuf* queued_output_f;  // queued output for fast-mode
+    Filebuf* response_buf_s;       // response buffer for slow-mode
 
-    // create the events and a connection to server
+    // create the events and connect to server
     explicit Server(const Connection* _conn);
     // close socket and delete the events
     ~Server();
+    int get_fd() {return event_get_fd(read_evt);}
     // response to client once it completed
     void recv_all_to_buffer(int fd);
 
@@ -225,33 +242,32 @@ class Server {
     // recv to buffer
     static void recv_msg(int fd, short/*flag*/, void* arg);
 
-
-    // "Connections can be closed at any time"
-    // "To avoid the TCP reset problem, servers typically close a connection
-    // in stages.  First, the server performs a half-close by closing only
-    // the write side of the read/write connection."
+    /* "Connections can be closed at any time"
+       "To avoid the TCP reset problem, servers typically close a connection
+       in stages.  First, the server performs a half-close by closing only
+       the write side of the read/write connection."
+    */
 
  private:
     unsigned long int content_len;  // TODO: Transfer-Encoding ??
 };
 
 
-/* TODO: description */
+/* class for handling connections */
 class Connection {
  public:
     Client* client;   // TODO: can we change to shared_ptr?
     Server* server;
-    Circularbuf read_buf;
-    Circularbuf write_buf;
 
     Connection();
     ~Connection();
     bool is_fast_mode() {return fast_mode;}
     bool set_slow_mode() {fast_mode = false;}
+    // TODO: description
+    void fast_forward(Client*/*client*/, Server*/*server*/);
+    void fast_forward(Server*/*server*/, Client*/*client*/);
     // create Connection and Client instances
     static void accept_new(int master_sock, short/*flag*/, void*/*arg*/);
-    static void fast_forward(Client* client, Server* server);
-    static void fast_forward(Server* server, Client* client);
 
  private:
     bool fast_mode;
@@ -259,13 +275,17 @@ class Connection {
 
 
 /* Utility functions */
-// replace newlines with dashes
+// replace all newlines with dashes
 inline char* replace_newlines(char* str);
 inline char* get_host(const struct sockaddr_in& addr);
 inline int get_port(const struct sockaddr_in& addr);
 // return in format host:port
 string get_host_and_port(const struct sockaddr_in& addr);
 inline int make_file_nonblocking(int fd);
+// read as much as possible
+struct io_stat read_all(int fd, char* buffer, int max_size);
+// write as much as possible
+struct io_stat write_all(int fd, const char* data, int size);
 // raise system-wide RLIMIT_NOFILE
 void raise_open_file_limit(unsigned long value);
 // reply with contents of 'res/503.html' and return num of bytes written

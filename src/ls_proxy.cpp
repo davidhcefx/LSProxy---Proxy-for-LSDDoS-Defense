@@ -1,9 +1,9 @@
 #include "ls_proxy.h"
 
 
-queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 struct event_base* evt_base;
-// char read_buffer[10240];  // temporary buffer //TODO: what size is appropriate?
+char global_buffer[SOCK_IO_BUF_SIZE];  // buffer for each read operation
+queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 // class variables
 char* Server::address;
 unsigned short Server::port;
@@ -13,12 +13,18 @@ int Server::connection_count = 0;
 Connection::Connection(): client{NULL}, server{NULL}, fast_mode{true} {}
 
 Connection::~Connection() {
-    if (server) {
-        server->~Server();
-    }
-    if (client) {
-        client->~Client();
-    }
+    if (server) delete server;
+    if (client) delete client;
+}
+
+void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
+    auto stat = server->queued_output_f->read_all_from(client->fd);
+
+    auto stat = server->queued_output_f->write_all_to(server->fd);
+}
+
+void Connection::fast_forward(Server*/*server*/, Client*/*client*/) {
+
 }
 
 void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
@@ -28,21 +34,17 @@ void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
     if (evutil_make_socket_nonblocking(sock) < 0) {
         ERROR_EXIT("Cannot make socket nonblocking");
     }
-    // if (free_filebufs.empty()) {
-    //     WARNING("Max connection <%d> reached", MAX_CONNECTION);
-    //     reply_with_503_unavailable(sock);
-    //     LOG1("Connection closed: [%s]\n", get_host_and_port(addr).c_str());
-    //     close(sock);
-    //     return;
-    // }
+    if (free_hybridbuf.empty()) {
+        WARNING("Max connection <%d> reached", MAX_CONNECTION);
+        reply_with_503_unavailable(sock);
+        LOG1("Connection closed: [%s]\n", get_host_and_port(addr).c_str());
+        close(sock);
+        return;
+    }
     Connection* conn = new Connection();
     conn->client = new Client(sock, addr, conn);
     add_event(conn->client->read_evt);
     LOG1("Connected by [%s]\n", conn->client->addr.c_str());
-}
-
-void Connection::fast_forward(Client* client, Server* server) {
-    client->a
 }
 
 inline char* replace_newlines(char* str) {
@@ -69,6 +71,43 @@ inline int make_file_nonblocking(int fd) {
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+struct io_stat read_all(int fd, char* buffer, int max_size) {
+    struct io_stat stat();
+    int remain = max_size;
+    while (remain > 0) {
+        int count = read(fd, buffer, remain);
+        if (count > 0) {
+            buffer += count;  // move ptr
+            remain -= count;
+        } else {
+            if (count == 0)
+                stat.has_eof = true;
+            else
+                stat.has_error = true;
+            break;
+        }
+    }
+    stat.nbytes = max_size - remain;
+    return stat;
+}
+
+struct io_stat write_all(int fd, const char* data, int size) {
+    struct io_stat stat();
+    int remain = size;
+    while (remain > 0) {
+        int count = write(fd, data, remain);
+        if (count > 0) {
+            data += count;  // move ptr
+            remain -= count;
+        } else {
+            stat.has_error = true;
+            break;
+        }
+    }
+    stat.nbytes = size - remain;
+    return stat;
+}
+
 void raise_open_file_limit(unsigned long value) {
     struct rlimit lim;
 
@@ -88,17 +127,15 @@ void raise_open_file_limit(unsigned long value) {
 int reply_with_503_unavailable(int sock) {
     // copy header
     const char* head = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\n\r\n";
-    char* ptr = read_buffer;
-    strncpy(ptr, head, sizeof(read_buffer));
-    ptr += strlen(head);
+    int count = min(strlen(head), sizeof(global_buffer));
+    memcpy(global_buffer, head, count);
     // copy body from file
-    int fd = open("utils/503.html", O_RDONLY);   // TODO: test this!
-    int n;
-    while ((n = read(fd, ptr, sizeof(read_buffer) - (ptr - read_buffer))) > 0) {
-        ptr += n;
-    }
+    int fd = open("utils/503.html", O_RDONLY);
+    auto stat = read_all(fd, global_buffer + count,
+                         sizeof(global_buffer) - count);
+    count += stat.nbytes;
     close(fd);
-    return write(sock, read_buffer, ptr - read_buffer);
+    return write_all(sock, global_buffer, count);
 }
 
 int passive_TCP(unsigned short port, int qlen) {
@@ -181,9 +218,9 @@ int main(int argc, char* argv[]) {
     raise_open_file_limit(MAX_FILE_DESC);
     int master_sock = passive_TCP(port);  // fd should be 3
     for (int i = 0; i < MAX_HYBRIDBUF; i++) {
-        free_filebufs.push(make_shared<Filebuf>());
+        free_hybridbuf.push(make_shared<Hybridbuf>());
     }
-    assert(master_sock == 3 && free_filebufs.back()->get_fd() == 3 + MAX_HYBRIDBUF);
+    assert(free_hybridbuf.back()->get_fd() == 3 + MAX_HYBRIDBUF);
 
     evt_base = event_base_new();
     add_event(new_read_event(master_sock, Connection::accept_new));

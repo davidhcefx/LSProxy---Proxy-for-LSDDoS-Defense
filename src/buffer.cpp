@@ -31,9 +31,10 @@ void Filebuf::_file_write(const char* data, int size) {
     for (int i = 0; i < 10 && remain > 0; i++) {  // try 10 times
         int count = write(fd, data, remain);
         if (count > 0) {
+            data += count;  // move ptr
             remain -= count;
         } else if (errno != EAGAIN && errno != EINTR) {  // not blocking nor interrupt
-            ERROR("Write failed");
+            ERROR("Write failed (retrying)");
             usleep(100);  // wait for 100us
         }
     }
@@ -87,15 +88,15 @@ inline void Hybridbuf::rewind() {
 }
 
 inline int Hybridbuf::_buf_remaining_space() {
-    if (next_pos < MAX_HEADER_SIZE) {
-        return MAX_HEADER_SIZE - next_pos;
+    if (next_pos < sizeof(buffer)) {
+        return sizeof(buffer) - next_pos;
     } else {
         return 0;
     }
 }
 
 inline int Hybridbuf::_buf_unread_data_size() {
-    return min(data_size, MAX_HEADER_SIZE) - next_pos;
+    return min(data_size, sizeof(buffer)) - next_pos;
 }
 
 int Hybridbuf::_buf_write(const char* data, int size) {
@@ -127,12 +128,61 @@ int Hybridbuf::_buf_read(char* result, int max_size) {
 
 /* ========================================================================= */
 
-int Circularbuf::read_all(int fd) {
-
+struct io_stat Circularbuf::read_all_from(int fd) {
+    auto stat = read_all(fd, global_buffer, remaining_space());
+    if (errno != EAGAIN && errno != EINTR) {
+        ERROR("Read failed (#%d)", fd);
+    }
+    // copy to internal buffer
+    if (stat.nbytes > 0) {
+        int remain = stat.nbytes;
+        if (end_ptr >= start_ptr) {
+            // copy towards right-end
+            int space_to_rightend = buffer + sizeof(buffer) - end_ptr;
+            int count = min(remain, space_to_rightend);
+            memcpy(end_ptr, global_buffer, count);
+            remain -= count;
+            if (count < space_to_rightend) {
+                end_ptr += count;
+            } else {
+                end_ptr = buffer;  // wrap to start
+            }
+        }
+        if (remain > 0) {
+            // copy towards start_ptr
+            memcpy(end_ptr, global_buffer + count, remain);
+            end_ptr += remain;
+        }
+    }
+    return stat;
 }
 
-int Circularbuf::write_all(int fd) {
-
+struct io_stat Circularbuf::write_all_to(int fd) {
+    struct io_stat stat();
+    int remain = data_size();
+    int orig_data_size = remain;
+    if (remain > 0) {
+        if (start_ptr > end_ptr) {
+            // fetch towards right-end
+            int size_to_rightend = buffer + sizeof(buffer) - start_ptr;
+            stat = write_all(fd, start_ptr, size_to_rightend);
+            remain -= stat.nbytes;
+            if (stat.nbytes < size_to_rightend) {
+                start_ptr += stat.nbytes;
+                assert(stat.has_error);  // must be having some error
+                return stat;
+            } else {
+                start_ptr = buffer;  // wrap to start
+            }
+        }
+        if (remain > 0) {
+            // fetch towards end_ptr
+            stat = write_all(fd, start_ptr, remain);
+            start_ptr += stat.nbytes;
+        }
+    }
+    stat.nbytes = orig_data_size - data_size();
+    return stat;
 }
 
 inline int Circularbuf::data_size() {

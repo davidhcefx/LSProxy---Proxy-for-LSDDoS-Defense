@@ -2,34 +2,36 @@
 
 
 Client::Client(int fd, const struct sockaddr_in& _addr, const Connection* _conn):
-    addr{get_host_and_port(_addr)}, request_buf{NULL}, conn{_conn}
+    addr{get_host_and_port(_addr)}, conn{_conn}, queued_output_f{NULL},
+    request_buf_s{NULL}
 {
     read_evt = new_read_event(fd, Client::recv_msg, this);
     write_evt = new_write_event(fd, Client::send_msg, this);
-    // filebuf = free_filebufs.front();
-    // free_filebufs.pop();
+    request_hist = free_hybridbuf.front();
+    free_hybridbuf.pop();
 }
 
 Client::~Client() {
     LOG1("Connection closed: [%s]\n", addr.c_str());
-    close(event_get_fd(read_evt));
+    close(get_fd());
     del_event(read_evt);
     del_event(write_evt);
     free_event(read_evt);
     free_event(write_evt);
-    // free_filebufs.push(filebuf);
+    free_hybridbuf.push(request_hist);
+    if (queued_output_f) delete queued_output_f;
+    if (request_buf_s) delete request_buf_s;
 }
 
 void Client::recv_to_buffer_slowly(int fd) {
-
 
     int count = read(fd, read_buffer, sizeof(read_buffer));
     if (count == 0) {
         // premature close
         if (client->server) {
-            client->server->~Server();
+            delete client->server;
         }
-        client->~Client();
+        delete client;
         return;
     }
 #ifdef LOG_LEVEL_2
@@ -87,11 +89,12 @@ void Client::recv_msg(int fd, short/*flag*/, void* arg) {
     auto client = (Client*)arg;
     auto conn = client->conn;
     if (conn->is_fast_mode()) {
-        if (!conn->server) {
+        if (!conn->server) {  // uninitialized
+            client->queued_output_f = new Circularbuf();
             conn->server = new Server(conn);
         }
         conn->fast_forward(client, conn->server);
-    } else {
+    } else {  // slow mode
         client->recv_to_buffer_slowly(fd);
     }
 }
@@ -102,9 +105,9 @@ void Client::send_msg(int fd, short/*flag*/, void* arg) {
     if (count <= 0) {
         // done replying
         if (client->server) {
-            client->server->~Server();
+            delete client->server;
         }
-        client->~Client();
+        delete client;
         return;
     }
     write(fd, read_buffer, count);

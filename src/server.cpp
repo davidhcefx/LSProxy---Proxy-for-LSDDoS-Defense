@@ -1,7 +1,9 @@
 #include "ls_proxy.h"
 
 
-Server::Server(const Connection* _conn): response_buf{NULL}, conn{_conn} {
+Server::Server(const Connection* _conn):
+    conn{_conn}, queued_output_f{new Circularbuf()}, response_buf_s{NULL}
+{
     int sock = connect_TCP(Server::address, Server::port);
     if (evutil_make_socket_nonblocking(sock) < 0) {
         ERROR_EXIT("Cannot make socket nonblocking");
@@ -13,11 +15,13 @@ Server::Server(const Connection* _conn): response_buf{NULL}, conn{_conn} {
 
 Server::~Server() {
     LOG2("Connection closed: [SERVER] (active: %d)\n", --Server::connection_count);
-    close(event_get_fd(read_evt));
+    close(get_fd());
     del_event(read_evt);
     del_event(write_evt);
     free_event(read_evt);
     free_event(write_evt);
+    if (queued_output_f) delete queued_output_f;
+    if (response_buf_s) delete response_buf_s;
 }
 
 void Server::recv_all_to_buffer(int fd) {
@@ -30,7 +34,7 @@ void Server::recv_all_to_buffer(int fd) {
         // start replying to client
         del_event(server->read_evt);
         server->filebuf->rewind();
-        server->~Server();  // destroy server
+        delete server;  // destroy server
         client->server = NULL;
         add_event(client->write_evt);
     }
@@ -59,14 +63,13 @@ bool Server::check_response_completed(int last_read_count) {
     return false;
 }
 
-
 void Server::recv_msg(int fd, short/*flag*/, void* arg) {
     auto server = (Server*)arg;
     auto conn = server->conn;
     if (conn->is_fast_mode()) {
-        // note: client always exists whenever server has message
+        assert(conn->client);  // client always exists whenever server has msg
         conn->fast_forward(server, conn->client);
-    } else {
+    } else {  // slow mode
         server->recv_all_to_buffer(fd);
     }
 }
