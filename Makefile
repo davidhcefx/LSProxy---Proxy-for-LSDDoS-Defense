@@ -1,17 +1,17 @@
 DISTRO := $(shell sed -n -E 's/^NAME="(.*)"/\1/p' /etc/*release)
 CPP := $(shell if command -v g++-8 >/dev/null 2>&1; then echo 'g++-8'; else echo 'g++'; fi)
 #CPPFLAGS := -Wall -Wextra -std=gnu++2a -O2
-CPPFLAGS := -Wall -Wextra -std=gnu++2a
-BINARIES := simple_attack ls_proxy
+CPPFLAGS := -Wall -Wextra -std=gnu++2a -g
 
 
-all: gnu++2a $(BINARIES)
+all: gnu++2a simple_attack ls_proxy
 
 simple_attack:
-	$(CPP) $(CPPFLAGS) src/simple_attack.cpp -o $@
+	$(CPP) $(CPPFLAGS) -o $@ src/simple_attack.cpp
 
 ls_proxy: libevent raise_limit
-	$(CPP) $(CPPFLAGS) -levent src/ls_proxy.cpp src/llhttp/libllhttp.so -o $@
+	$(CPP) $(CPPFLAGS) -o $@ src/llhttp/libllhttp.so \
+        src/ls_proxy.cpp src/buffer.cpp src/client.cpp src/server.cpp -levent
 
 raise_limit:
 	./utils/raise_nofile_limit.sh
@@ -47,6 +47,6 @@ libevent:
 	fi
 
 clean:
-	rm -f $(BINARIES)
+	rm -f simple_attack ls_proxy
 
 .PHONY: all clean raise_limit gnu++2a libevent

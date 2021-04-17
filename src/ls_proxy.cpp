@@ -7,7 +7,7 @@ queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 // class variables
 char* Server::address;
 unsigned short Server::port;
-int Server::connection_count = 0;
+unsigned Server::connection_count = 0;
 
 
 Connection::Connection(): client{NULL}, server{NULL}, fast_mode{true} {}
@@ -18,13 +18,45 @@ Connection::~Connection() {
 }
 
 void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
-    auto stat = server->queued_output_f->read_all_from(client->fd);
-
-    auto stat = server->queued_output_f->write_all_to(server->fd);
+    // append to server's queued output
+    auto stat_c = server->queued_output_f->read_all_from(client->get_fd());
+    auto stat_s = server->queued_output_f->write_all_to(server->get_fd());
+    LOG2("[%s] %lu >> QUEUE(%lu) >> %lu [SERVER]\n", client->addr.c_str(),
+         stat_c.nbytes, server->queued_output_f->data_size(), stat_s.nbytes);
+    if (stat_c.has_eof) {  // client closed
+        delete this;
+        return;
+    }
+    if (stat_s.nbytes == 0) {  // server unwritable
+        // disable client's read temporarily
+        del_event(client->read_evt);
+        add_event(server->write_evt);
+    }
 }
 
 void Connection::fast_forward(Server*/*server*/, Client*/*client*/) {
-
+    // append to client's queued output
+    auto stat_s = client->queued_output_f->read_all_from(server->get_fd());
+    auto stat_c = client->queued_output_f->write_all_to(client->get_fd());
+    LOG2("[%s] %lu << QUEUE(%lu) << %lu [SERVER]\n", client->addr.c_str(),
+         stat_c.nbytes, client->queued_output_f->data_size(), stat_s.nbytes);
+    if (stat_s.has_eof) {  // server closed
+        if (client->queued_output_f->data_size() > 0) {
+            // TODO(davidhcefx): change to use Filebuf to prevent read attack
+            // wait for the remaining msg to be replied
+            delete server;
+            server = NULL;
+            add_event(client->write_evt);
+        } else {
+            delete this;
+        }
+        return;
+    }
+    if (stat_c.nbytes == 0) {  // client unwritable
+        // disable server's read temporily
+        del_event(server->read_evt);
+        add_event(client->write_evt);
+    }
 }
 
 void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
@@ -47,35 +79,15 @@ void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
     LOG1("Connected by [%s]\n", conn->client->addr.c_str());
 }
 
-inline char* replace_newlines(char* str) {
-    for (char* ptr = strchr(str, '\n'); ptr; ptr = strchr(ptr, '\n')) {
-        *ptr = '_';
-    }
-    return str;
-}
-
-inline char* get_host(const struct sockaddr_in& addr) {
-    return inet_ntoa(addr.sin_addr);
-}
-
-inline int get_port(const struct sockaddr_in& addr) {
-    return ntohs(addr.sin_port);
-}
-
 string get_host_and_port(const struct sockaddr_in& addr) {
     return string(get_host(addr)) + ":" + to_string(get_port(addr));
 }
 
-inline int make_file_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-struct io_stat read_all(int fd, char* buffer, int max_size) {
-    struct io_stat stat();
-    int remain = max_size;
+struct io_stat read_all(int fd, char* buffer, size_t max_size) {
+    struct io_stat stat;
+    auto remain = max_size;
     while (remain > 0) {
-        int count = read(fd, buffer, remain);
+        auto count = read(fd, buffer, remain);
         if (count > 0) {
             buffer += count;  // move ptr
             remain -= count;
@@ -91,11 +103,11 @@ struct io_stat read_all(int fd, char* buffer, int max_size) {
     return stat;
 }
 
-struct io_stat write_all(int fd, const char* data, int size) {
-    struct io_stat stat();
-    int remain = size;
+struct io_stat write_all(int fd, const char* data, size_t size) {
+    struct io_stat stat;
+    auto remain = size;
     while (remain > 0) {
-        int count = write(fd, data, remain);
+        auto count = write(fd, data, remain);
         if (count > 0) {
             data += count;  // move ptr
             remain -= count;
@@ -108,7 +120,7 @@ struct io_stat write_all(int fd, const char* data, int size) {
     return stat;
 }
 
-void raise_open_file_limit(unsigned long value) {
+void raise_open_file_limit(size_t value) {
     struct rlimit lim;
 
     if (getrlimit(RLIMIT_NOFILE, &lim) < 0) {
@@ -124,10 +136,10 @@ void raise_open_file_limit(unsigned long value) {
     }
 }
 
-int reply_with_503_unavailable(int sock) {
+size_t reply_with_503_unavailable(int sock) {
     // copy header
     const char* head = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\n\r\n";
-    int count = min(strlen(head), sizeof(global_buffer));
+    auto count = min(strlen(head), sizeof(global_buffer));
     memcpy(global_buffer, head, count);
     // copy body from file
     int fd = open("utils/503.html", O_RDONLY);
@@ -135,7 +147,7 @@ int reply_with_503_unavailable(int sock) {
                          sizeof(global_buffer) - count);
     count += stat.nbytes;
     close(fd);
-    return write_all(sock, global_buffer, count);
+    return write_all(sock, global_buffer, count).nbytes;
 }
 
 int passive_TCP(unsigned short port, int qlen) {
@@ -143,6 +155,7 @@ int passive_TCP(unsigned short port, int qlen) {
         .sin_family = AF_INET,
         .sin_port = htons(port),
         .sin_addr = {.s_addr = INADDR_ANY},
+        .sin_zero = {0},
     };
     int sockFd;
 
@@ -181,26 +194,6 @@ int connect_TCP(const char* host, unsigned short port) {
     }
     // LOG2("Connected to %s:%d\n", get_host(addr), get_port(addr));
     return sockFd;
-}
-
-inline struct event* new_read_event(int fd, event_callback_fn cb, void* arg) {
-    return event_new(evt_base, fd, EV_READ | EV_PERSIST, cb, arg);
-}
-
-inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg) {
-    return event_new(evt_base, fd, EV_WRITE | EV_PERSIST, cb, arg);
-}
-
-inline void add_event(struct event* evt) {
-    if (event_add(evt, NULL) < 0) {
-        ERROR_EXIT("Cannot add event");
-    }
-}
-
-inline void del_event(struct event* evt) {
-    if (event_del(evt) < 0) {
-        ERROR_EXIT("Cannot del event");
-    }
 }
 
 int main(int argc, char* argv[]) {

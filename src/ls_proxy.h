@@ -88,9 +88,9 @@ using std::min;
  *
  * Progress:
  * [x] Event-based arch.
- * [ ] Fast-mode (no buffer)
- * [ ] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
+ * [x] Fast-mode
  * [ ] History temp
+ * [ ] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
  * [ ] Transfer rate monitor
  * [ ] Transition logic
  * [-] Shorter keep-alive timeout
@@ -99,9 +99,9 @@ using std::min;
 
 
 struct io_stat {
-    int nbytes;    // number of bytes actually read/written
+    size_t nbytes;  // number of bytes actually read/written
     bool has_error;
-    bool has_eof;  // when read returns 0
+    bool has_eof;   // when read returns 0
     io_stat(): nbytes{0}, has_error{false}, has_eof{false} {}
 };
 
@@ -109,29 +109,29 @@ struct io_stat {
 /* class for using a file as buffer */
 class Filebuf {
  public:
-    int data_size;
+    size_t data_size;
 
     Filebuf();
-    ~Filebuf() {close(fd);}
+    virtual ~Filebuf() {close(fd);}
     // upon disk failure, expect delays or data loss
     // storing before clearing content will cause undefined behavior
-    virtual inline void store(const char* data, int size) {_file_write(data, size);}
+    virtual void store(const char* data, size_t size) {_file_write(data, size);}
     // print error message when failed
-    virtual inline int fetch(char* result, int max_size) {_file_read(result, max_size);}
+    virtual ssize_t fetch(char* result, size_t max_size) {return _file_read(result, max_size);}
     // rewind content cursor (for further reads)
-    virtual inline void rewind() {_file_rewind();}
+    virtual void rewind() {_file_rewind();}
     // clear content and rewind
     void clear();
-    inline int get_fd() {return fd;}
+    int get_fd() {return fd;}
 
- private:
+ protected:
     /* File buffer */
     int fd;
     string file_name;
     // retry 10 times with delays before failure
-    void _file_write(const char* data, int size);
+    void _file_write(const char* data, size_t size);
     // print error message and return -1 if failed
-    inline int _file_read(char* result, int max_size);
+    inline ssize_t _file_read(char* result, size_t max_size);
     inline void _file_rewind();
 };
 
@@ -140,37 +140,33 @@ class Filebuf {
 class Hybridbuf: public Filebuf {
  public:
     Hybridbuf(): next_pos{0} {};
-    ~Hybridbuf() {};
-    // @override
-    inline void store(const char* data, int size);
-    // @override
-    inline int fetch(char* result, int max_size);
-    // @override
-    inline void rewind();
+    void store(const char* data, size_t size) override;
+    ssize_t fetch(char* result, size_t max_size) override;
+    void rewind() override { _file_rewind(); _buf_rewind(); }
 
- private:
+ protected:
     /* Memory buffer */
     char buffer[HIST_CACHE_SIZE];
-    int next_pos;  // next read/write position, range [0, HIST_CACHE_SIZE]
-    inline int _buf_remaining_space();
-    inline int _buf_unread_data_size();
-    int _buf_write(const char* data, int size);
-    int _buf_read(char* result, int max_size);
-    inline void _buf_rewind() { next_pos = 0; }
+    unsigned next_pos;  // next read/write position, range [0, HIST_CACHE_SIZE]
+    inline size_t _buf_remaining_space();
+    inline size_t _buf_unread_data_size();
+    size_t _buf_write(const char* data, size_t size);
+    size_t _buf_read(char* result, size_t max_size);
+    void _buf_rewind() { next_pos = 0; }
 };
 
 
 /* Efficient in-memory circular buffer */
 class Circularbuf {
  public:
-    Circularbuf(): start_ptr{0}, end_ptr{0} {}
+    Circularbuf(): start_ptr{buffer}, end_ptr{buffer} {}
     // read in as much as possible from fd; set has_eof when eof
     struct io_stat read_all_from(int fd);
     // write out as much as possible to fd
     struct io_stat write_all_to(int fd);
-    inline int data_size();
+    inline size_t data_size();
     // return value in range [0, SOCK_IO_BUF_SIZE)
-    inline int remaining_space();
+    size_t remaining_space() {return sizeof(buffer) - 1 - data_size();}
 
  private:
     char buffer[SOCK_IO_BUF_SIZE];  // last byte don't store data
@@ -180,6 +176,8 @@ class Circularbuf {
 
 
 class Connection;
+extern char global_buffer[SOCK_IO_BUF_SIZE];
+extern queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 
 /* class for handling client io */
 class Client {
@@ -195,7 +193,7 @@ class Client {
     // transfer_rate;
 
     // create the events and allocate Hybridbuf
-    Client(int fd, const struct sockaddr_in& _addr, const Connection* _conn);
+    Client(int fd, const struct sockaddr_in& _addr, Connection* _conn);
     // close socket, delete the events and release Hybridbuf
     ~Client();
     int get_fd() {return event_get_fd(read_evt);}
@@ -220,7 +218,7 @@ class Server {
  public:
     static char* address;         // the server to be protected
     static unsigned short port;   // the server to be protected
-    static int connection_count;  // number of active connections
+    static unsigned connection_count;  // number of active connections
     Connection* conn;
     struct event* read_evt;  // both events have ptr keeping track of *this
     struct event* write_evt;
@@ -228,7 +226,7 @@ class Server {
     Filebuf* response_buf_s;       // response buffer for slow-mode
 
     // create the events and connect to server
-    explicit Server(const Connection* _conn);
+    explicit Server(Connection* _conn);
     // close socket and delete the events
     ~Server();
     int get_fd() {return event_get_fd(read_evt);}
@@ -262,7 +260,7 @@ class Connection {
     Connection();
     ~Connection();
     bool is_fast_mode() {return fast_mode;}
-    bool set_slow_mode() {fast_mode = false;}
+    void set_slow_mode() {fast_mode = false;}
     // TODO: description
     void fast_forward(Client*/*client*/, Server*/*server*/);
     void fast_forward(Server*/*server*/, Client*/*client*/);
@@ -274,40 +272,109 @@ class Connection {
 };
 
 
+/* Inline implementations */
+inline ssize_t Filebuf::_file_read(char* result, size_t max_size) {
+    auto count = read(fd, result, max_size);
+    if (count < 0) {
+        ERROR("Read failed '%s'", file_name.c_str());
+    }
+    return count;
+}
+
+inline void Filebuf::_file_rewind() {
+    if (lseek(fd, 0, SEEK_SET) < 0) {
+        ERROR_EXIT("Cannot lseek");
+    }
+}
+
+inline size_t Hybridbuf::_buf_remaining_space() {
+    if (next_pos < sizeof(buffer)) {
+        return sizeof(buffer) - next_pos;
+    } else {
+        return 0;
+    }
+}
+
+inline size_t Hybridbuf::_buf_unread_data_size() {
+    return min(data_size, sizeof(buffer)) - next_pos;
+}
+
+inline size_t Circularbuf::data_size() {
+    if (end_ptr >= start_ptr) {
+        return end_ptr - start_ptr;
+    } else {
+        return sizeof(buffer) - (start_ptr - end_ptr);
+    }
+}
+
 /* Utility functions */
 // replace all newlines with dashes
-inline char* replace_newlines(char* str);
-inline char* get_host(const struct sockaddr_in& addr);
-inline int get_port(const struct sockaddr_in& addr);
+inline char* replace_newlines(char* str) {
+    for (char* ptr = strchr(str, '\n'); ptr; ptr = strchr(ptr, '\n')) {
+        *ptr = '_';
+    }
+    return str;
+}
+
+inline char* get_host(const struct sockaddr_in& addr) {
+    return inet_ntoa(addr.sin_addr);
+}
+
+inline int get_port(const struct sockaddr_in& addr) {
+    return ntohs(addr.sin_port);
+}
+
+inline int make_file_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
 // return in format host:port
 string get_host_and_port(const struct sockaddr_in& addr);
-inline int make_file_nonblocking(int fd);
 // read as much as possible
-struct io_stat read_all(int fd, char* buffer, int max_size);
+struct io_stat read_all(int fd, char* buffer, size_t max_size);
 // write as much as possible
-struct io_stat write_all(int fd, const char* data, int size);
+struct io_stat write_all(int fd, const char* data, size_t size);
 // raise system-wide RLIMIT_NOFILE
-void raise_open_file_limit(unsigned long value);
+void raise_open_file_limit(size_t value);
 // reply with contents of 'res/503.html' and return num of bytes written
-int reply_with_503_unavailable(int sock);
+size_t reply_with_503_unavailable(int sock);
 // return master socket Fd
 int passive_TCP(unsigned short port, int qlen = 128);
 // return socket Fd; host can be either hostname or IP address.
 int connect_TCP(const char* host, unsigned short port);
-// signal handler
-void break_event_loop(int/*sig*/) { event_base_loopbreak(evt_base); }
-// event_base callback
-int close_event_connection(const struct event_base*, const struct event* evt,
-                           void*/*arg*/)
-{ return close(event_get_fd(evt)); }
 
 /* Event wrappers */
 extern struct event_base* evt_base;
-inline struct event* new_read_event(int fd, event_callback_fn cb, void* arg = NULL);
-inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = NULL);
-inline void add_event(struct event* evt);
-inline void del_event(struct event* evt);
+inline struct event* new_read_event(int fd, event_callback_fn cb, void* arg = NULL) {
+    return event_new(evt_base, fd, EV_READ | EV_PERSIST, cb, arg);
+}
+
+inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = NULL) {
+    return event_new(evt_base, fd, EV_WRITE | EV_PERSIST, cb, arg);
+}
+
+inline void add_event(struct event* evt) {
+    if (event_add(evt, NULL) < 0) {
+        ERROR_EXIT("Cannot add event");
+    }    
+}
+
+inline void del_event(struct event* evt) {
+    if (event_del(evt) < 0) {
+        ERROR_EXIT("Cannot del event");
+    }
+}
+
 inline void free_event(struct event* evt) { event_free(evt); }
 
+// signal handler
+inline void break_event_loop(int/*sig*/) { event_base_loopbreak(evt_base); }
+
+// event_base callback
+inline int close_event_connection(const struct event_base*,
+                                  const struct event* evt, void*/*arg*/) {
+    return close(event_get_fd(evt));
+}
 
 #endif  // SRC_LS_PROXY_H_
