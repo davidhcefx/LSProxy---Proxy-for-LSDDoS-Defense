@@ -3,11 +3,11 @@
 
 Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
     addr{get_host_and_port(_addr)}, conn{_conn}, queued_output_f{NULL},
-    request_buf_s{NULL}
+    request_buf_s{new Filebuf()}
 {
-    read_evt = new_read_event(fd, Client::recv_msg, this);
-    write_evt = new_write_event(fd, Client::send_msg, this);
-    request_hist = free_hybridbuf.front();
+    read_evt = new_read_event(fd, Client::on_readable, this);
+    write_evt = new_write_event(fd, Client::on_writable, this);
+    request_history = free_hybridbuf.front();
     free_hybridbuf.pop();
 }
 
@@ -18,9 +18,21 @@ Client::~Client() {
     del_event(write_evt);
     free_event(read_evt);
     free_event(write_evt);
-    free_hybridbuf.push(request_hist);
+    free_hybridbuf.push(request_history);
     if (queued_output_f) delete queued_output_f;
     if (request_buf_s) delete request_buf_s;
+}
+
+void Client::keep_track_request_history(const char* data, size_t size) {
+    if (!conn->do_parse(data, size)) return;  // parser error
+    auto start_ptr = conn->get_cur_request_start();
+    if (data <= start_ptr && start_ptr < data + size) {
+        // start a new recording
+        request_history->clear();
+        request_history->store(start_ptr, size - (start_ptr - data));
+    } else {
+        request_history->store(data, size);
+    }
 }
 
 void Client::recv_to_buffer_slowly(int fd) {
@@ -51,47 +63,14 @@ void Client::recv_to_buffer_slowly(int fd) {
 //     }
 }
 
-bool Client::check_request_completed(int last_read_count) {
-    // if (header_len == 0) {  // header_len not set
-    //     int offset = filebuf->search_double_crlf();
-    //     if (offset == -1) {
-    //         return false;
-    //     } else if (offset == 0) {
-    //         WARNING("Not ")
-    //         return true;
-    //     }
-    //     header_len = offset;
-    // }
-    // if (content_len == 0) {  // content_len not set
-    //     constexpr int digits = log10(MAX_BODY_SIZE) + 3;
-    //     char res[digits];
-    //     filebuf->search_header(CRLF "Content-Length:", res, header_len);
-    //     content_len = atoi(res);  // TODO: atoi ?
-    //     if (content_len == 0) {  // no Content-Length
-    //         return true;
-    //     }
-    // }
-    // TODO: transfer encoding?
-
-    // if (content_len + header_len == data_size)
-
-    // if (content_len == 0) {
-    //     return true;
-    // } else if (filebuf->data_size - )
-
-    // if (last_read_count == 5) return true;
-    // return false;
-
-    // TODO: when it sees CRLF, it sets content_len if request type has body (beware of overflow)
-}
-
-void Client::recv_msg(int fd, short/*flag*/, void* arg) {
+void Client::on_readable(int fd, short/*flag*/, void* arg) {
     auto client = (Client*)arg;
     auto conn = client->conn;
     if (conn->is_fast_mode()) {
-        if (!conn->server) {  // uninitialized
-            client->queued_output_f = new Circularbuf();
+        if (conn->parser_uninitialized()) {
+            conn->init_parser();
             conn->server = new Server(conn);
+            client->queued_output_f = new Circularbuf();
             add_event(conn->server->read_evt);
         }
         conn->fast_forward(client, conn->server);
@@ -100,23 +79,23 @@ void Client::recv_msg(int fd, short/*flag*/, void* arg) {
     }
 }
 
-void Client::send_msg(int/*fd*/, short/*flag*/, void* arg) {
+void Client::on_writable(int/*fd*/, short/*flag*/, void* arg) {
     auto client = (Client*)arg;
     auto conn = client->conn;
     if (conn->is_fast_mode()) {
-        if (!conn->server) {  // server already closed
+        if (!conn->server) {  // server closed (reply-only mode)
             client->queued_output_f->write_all_to(client->get_fd());
             if (client->queued_output_f->data_size() == 0) {
                 delete conn;
             }
         } else {
-            // add back server->read_evt because we removed it before
-            add_event(conn->server->read_evt);
+            // add back server's read_evt because we removed it before
             del_event(client->write_evt);
+            add_event(conn->server->read_evt);
             LOG2("[%s] Added back server->read_evt\n", client->addr.c_str());
         }
     } else {
-
+        // TODO
     }
 
 //     int count = client->filebuf->fetch(read_buffer, sizeof(read_buffer));

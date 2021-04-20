@@ -15,11 +15,9 @@
 #include <cstring>
 #include <cassert>
 #include <climits>
-#include <cmath>
 #include <string>
 #include <memory>
 #include <queue>
-#include <algorithm>
 #define MAX_CONNECTION    6  // 65536    // adjust it if needed // TODO: automatically setup
 #define MAX_HYBRIDBUF     MAX_CONNECTION
 #define MAX_FILE_DESC     5 * MAX_CONNECTION + 3  // see FILE DESCRIPTOR MAP
@@ -128,11 +126,20 @@ class Filebuf {
     /* File buffer */
     int fd;
     string file_name;
+
     // retry 10 times with delays before failure
     void _file_write(const char* data, size_t size);
-    // print error message and return -1 if failed
-    inline ssize_t _file_read(char* result, size_t max_size);
-    inline void _file_rewind();
+    // print error message if failed
+    ssize_t _file_read(char* result, size_t max_size) {
+        auto count = read(fd, result, max_size);
+        if (count < 0) {
+            ERROR("Read failed '%s'", file_name.c_str());
+        }
+        return count;
+    }
+    void _file_rewind() {
+        if (lseek(fd, 0, SEEK_SET) < 0) ERROR_EXIT("Cannot lseek");
+    }
 };
 
 
@@ -148,8 +155,13 @@ class Hybridbuf: public Filebuf {
     /* Memory buffer */
     char buffer[HIST_CACHE_SIZE];
     unsigned next_pos;  // next read/write position, range [0, HIST_CACHE_SIZE]
-    inline size_t _buf_remaining_space();
-    inline size_t _buf_unread_data_size();
+
+    size_t _buf_remaining_space() {
+        return next_pos < sizeof(buffer) ? sizeof(buffer) - next_pos : 0;
+    }
+    size_t _buf_unread_data_size() {
+        return min(data_size, sizeof(buffer)) - next_pos;
+    }
     size_t _buf_write(const char* data, size_t size);
     size_t _buf_read(char* result, size_t max_size);
     void _buf_rewind() { next_pos = 0; }
@@ -160,22 +172,28 @@ class Hybridbuf: public Filebuf {
 class Circularbuf {
  public:
     Circularbuf(): start_ptr{buffer}, end_ptr{buffer} {}
+    // copy to internal buffer at most remaining_space bytes
+    size_t copy_from(const char* data, size_t size);
     // read in as much as possible from fd; set has_eof when eof
     struct io_stat read_all_from(int fd);
     // write out as much as possible to fd
     struct io_stat write_all_to(int fd);
-    inline size_t data_size();
+    size_t data_size() {
+        return (start_ptr <= end_ptr) ? \
+            end_ptr - start_ptr : sizeof(buffer) - (start_ptr - end_ptr);
+    }
     // return value in range [0, SOCK_IO_BUF_SIZE)
-    size_t remaining_space() {return sizeof(buffer) - 1 - data_size();}
+    size_t remaining_space() { return sizeof(buffer) - 1 - data_size(); }
 
  private:
     char buffer[SOCK_IO_BUF_SIZE];  // last byte don't store data
-    char* start_ptr;                // points to data start
-    char* end_ptr;                  // points next to data end
+    char* start_ptr;  // points to data start
+    char* end_ptr;    // points next to data end
 };
 
 
 class Connection;
+extern llhttp_settings_t parser_settings;
 extern char global_buffer[SOCK_IO_BUF_SIZE];
 extern queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 
@@ -186,7 +204,6 @@ class Client {
     Connection* conn;        // TODO: is it worth using shared_ptr?
     struct event* read_evt;  // both events have ptr keeping track of *this
     struct event* write_evt;
-    shared_ptr<Hybridbuf> request_hist;  // incomplete request history
     Circularbuf* queued_output_f;  // queued output for fast-mode
     Filebuf* request_buf_s;        // request buffer for slow-mode
     // TODO: we need a queue-like buffer for slow-mode
@@ -197,19 +214,20 @@ class Client {
     // close socket, delete the events and release Hybridbuf
     ~Client();
     int get_fd() {return event_get_fd(read_evt);}
+    // keep incomplete requests to history; clear history when completed
+    void keep_track_request_history(const char* data, size_t size);
     // upon completed, forward each request to server one at a time
     void recv_to_buffer_slowly(int fd);
 
     // check if Content-Length or Transfer-Encoding completed
     // if it has neither, check if double CRLF arrived
-    bool check_request_completed(int last_read_count);
-    // recv to buffer   // TODO
-    static void recv_msg(int fd, short/*flag*/, void* arg);
-    // free instance after finished
-    static void send_msg(int fd, short/*flag*/, void* arg);
+    // bool check_request_completed(int last_read_count);
+
+    static void on_readable(int fd, short/*flag*/, void* arg);
+    static void on_writable(int fd, short/*flag*/, void* arg);
 
  private:
-    // unsigned long content_len;  // TODO: Transfer-Encoding ??
+    shared_ptr<Hybridbuf> request_history;
 };
 
 
@@ -234,78 +252,67 @@ class Server {
     void recv_all_to_buffer(int fd);
 
     // check for content-length   // TODO: or what?
-    bool check_response_completed(int last_read_count);
-    // send from buffer; clears buffer for response after finished   // TODO
-    static void send_msg(int fd, short/*flag*/, void* arg);
-    // recv to buffer
-    static void recv_msg(int fd, short/*flag*/, void* arg);
+    // bool check_response_completed(int last_read_count);
 
-    /* "Connections can be closed at any time"
+    static void on_readable(int fd, short/*flag*/, void* arg);
+    static void on_writable(int fd, short/*flag*/, void* arg);
+
+    /*
        "To avoid the TCP reset problem, servers typically close a connection
        in stages.  First, the server performs a half-close by closing only
        the write side of the read/write connection."
     */
 
  private:
-    unsigned long int content_len;  // TODO: Transfer-Encoding ??
+    // unsigned long int content_len;  // TODO: Transfer-Encoding ??
 };
 
 
 /* class for handling connections */
 class Connection {
  public:
-    Client* client;   // TODO: can we change to shared_ptr?
+    Client* client;  // TODO: can we change to shared_ptr?
     Server* server;
 
-    Connection();
-    ~Connection();
-    bool is_fast_mode() {return fast_mode;}
-    void set_slow_mode() {fast_mode = false;}
-    // TODO: description
+    Connection(): client{NULL}, server{NULL}, parser{NULL}, fast_mode{true} {}
+    ~Connection() { _delete_server(); _delete_client(); _delete_parser(); }
+    bool is_fast_mode() { return fast_mode; }
+    void set_slow_mode() { fast_mode = false; }
+    bool parser_uninitialized() { return parser == NULL; }
+    // allocate a new parser and reset it
+    void init_parser() { parser = new llhttp_t; reset_parser(); }
+    // call it before changing from parsing requests to responses
+    void reset_parser() { llhttp_init(parser, HTTP_BOTH, &parser_settings); }
+    // invoke callbacks along the way; close conn when error
+    bool do_parse(const char* data, size_t size);
+    // get ptr to the start of cur request or NULL; set parser->data to NULL
+    char* get_cur_request_start() { return _get_cur_msg_start(); }
+    char* get_cur_response_start() { return _get_cur_msg_start(); }
+    // forward client's msg to server; close server when client closed
     void fast_forward(Client*/*client*/, Server*/*server*/);
+    // forward server's msg to client; put client to reply-only mode when server closed
     void fast_forward(Server*/*server*/, Client*/*client*/);
+    void free_server_and_parser() { _delete_server(); _delete_parser(); }
+    // disable client's read_evt, and reply remaining msg to it
+    void make_client_reply_only_mode();
     // create Connection and Client instances
     static void accept_new(int master_sock, short/*flag*/, void*/*arg*/);
 
  private:
+    llhttp_t* parser;  // each connection shares a parser
     bool fast_mode;
+
+    void _delete_server() { if (server) { delete server; server = NULL; } }
+    void _delete_client() { if (client) { delete client; client = NULL; } }
+    void _delete_parser() { if (parser) { delete parser; parser = NULL; } }
+    // get ptr to the start of cur msg or NULL; set parser->data to NULL
+    char* _get_cur_msg_start() {
+        auto ptr = (char*)parser->data;
+        parser->data = NULL;
+        return ptr;
+    }
 };
 
-
-/* Inline implementations */
-inline ssize_t Filebuf::_file_read(char* result, size_t max_size) {
-    auto count = read(fd, result, max_size);
-    if (count < 0) {
-        ERROR("Read failed '%s'", file_name.c_str());
-    }
-    return count;
-}
-
-inline void Filebuf::_file_rewind() {
-    if (lseek(fd, 0, SEEK_SET) < 0) {
-        ERROR_EXIT("Cannot lseek");
-    }
-}
-
-inline size_t Hybridbuf::_buf_remaining_space() {
-    if (next_pos < sizeof(buffer)) {
-        return sizeof(buffer) - next_pos;
-    } else {
-        return 0;
-    }
-}
-
-inline size_t Hybridbuf::_buf_unread_data_size() {
-    return min(data_size, sizeof(buffer)) - next_pos;
-}
-
-inline size_t Circularbuf::data_size() {
-    if (end_ptr >= start_ptr) {
-        return end_ptr - start_ptr;
-    } else {
-        return sizeof(buffer) - (start_ptr - end_ptr);
-    }
-}
 
 /* Utility functions */
 // replace all newlines with dashes
@@ -376,5 +383,6 @@ inline int close_event_connection(const struct event_base*,
                                   const struct event* evt, void*/*arg*/) {
     return close(event_get_fd(evt));
 }
+
 
 #endif  // SRC_LS_PROXY_H_

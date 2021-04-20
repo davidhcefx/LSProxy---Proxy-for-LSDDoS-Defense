@@ -4,17 +4,13 @@ CPP := $(shell if command -v g++-8 >/dev/null 2>&1; then echo 'g++-8'; else echo
 CPPFLAGS := -Wall -Wextra -std=gnu++2a -g
 
 
-all: gnu++2a simple_attack ls_proxy
+all: gnu++2a libevent raise_limit simple_attack ls_proxy
 
-simple_attack:
-	$(CPP) $(CPPFLAGS) -o $@ src/simple_attack.cpp
+simple_attack: src/simple_attack.cpp
+	$(CPP) $(CPPFLAGS) -o $@ $^
 
-ls_proxy: libevent raise_limit
-	$(CPP) $(CPPFLAGS) -o $@ src/llhttp/libllhttp.so \
-        src/ls_proxy.cpp src/buffer.cpp src/client.cpp src/server.cpp -levent
-
-raise_limit:
-	./utils/raise_nofile_limit.sh
+ls_proxy: src/ls_proxy.cpp src/buffer.cpp src/client.cpp src/server.cpp
+	$(CPP) $(CPPFLAGS) -o $@ $^ src/llhttp/libllhttp.so -levent
 
 gnu++2a:
 	# check if -std=gnu++2a is supported
@@ -45,6 +41,9 @@ libevent:
 			echo "Please install libevent-dev manually on your platform.";; \
 		esac \
 	fi
+
+raise_limit:
+	./utils/raise_nofile_limit.sh
 
 clean:
 	rm -f simple_attack ls_proxy

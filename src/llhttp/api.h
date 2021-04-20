@@ -40,7 +40,7 @@ struct llhttp_settings_s {
   llhttp_data_cb on_body;
 
   /* Possible return values 0, -1, `HPE_PAUSED` */
-  llhttp_cb      on_message_complete;
+  llhttp_data_cb on_message_complete;
 
   /* When on_chunk_header is called, the current chunk length is stored
    * in parser->content_length.
@@ -131,7 +131,7 @@ llhttp_errno_t llhttp_execute(llhttp_t* parser, const char* data, size_t len);
  * request was terminated safely. Otherwise a error code would be returned.
  */
 LLHTTP_EXPORT
-llhttp_errno_t llhttp_finish(llhttp_t* parser);
+llhttp_errno_t llhttp_finish(llhttp_t* parser, const char* data, size_t len);
 
 /* Returns `1` if the incoming message is parsed until the last byte, and has
  * to be completed by calling `llhttp_finish()` on EOF

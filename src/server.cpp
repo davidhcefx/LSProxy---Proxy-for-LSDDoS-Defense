@@ -9,8 +9,8 @@ Server::Server(Connection* _conn):
         ERROR_EXIT("Cannot make socket nonblocking");
     }
     LOG2("Connected to [SERVER] (active: %d)\n", ++Server::connection_count);
-    read_evt = new_read_event(sock, Server::recv_msg, this);
-    write_evt = new_write_event(sock, Server::send_msg, this);
+    read_evt = new_read_event(sock, Server::on_readable, this);
+    write_evt = new_write_event(sock, Server::on_writable, this);
 }
 
 Server::~Server() {
@@ -40,30 +40,14 @@ void Server::recv_all_to_buffer(int fd) {
     // }
 }
 
-bool Server::check_response_completed(int last_read_count) {
+// bool Server::check_response_completed(int last_read_count) {
     // TODO: HEAD method can has content-length, but no body
     // TODO: 304 Not Modified can has transfer-encoding, but no body
 
-    // constexpr int digits = log10(MAX_BODY_SIZE) + 3;
-    // char res[digits];
-
     // TODO: detect transfer encoding first
+// }
 
-    // if (last_read_count == 5) return true;
-    // return false;
-
-    // if (content_len == 0) {  // not yet parsed
-    //     filebuf->search_header_membuf(CRLF "Content-Length:", res);
-    //     content_len = atoi(res);
-    // }
-    // if (content_len > 0 && filebuf->data_size /*???*/ == content_len) {
-    //     // TODO: new header_len member?
-    //     return true;
-    // }
-    // return false;
-}
-
-void Server::recv_msg(int fd, short/*flag*/, void* arg) {
+void Server::on_readable(int fd, short/*flag*/, void* arg) {
     auto server = (Server*)arg;
     auto conn = server->conn;
     if (conn->is_fast_mode()) {
@@ -74,16 +58,16 @@ void Server::recv_msg(int fd, short/*flag*/, void* arg) {
     }
 }
 
-void Server::send_msg(int/*fd*/, short/*flag*/, void* arg) {
+void Server::on_writable(int/*fd*/, short/*flag*/, void* arg) {
     auto server = (Server*)arg;
     auto conn = server->conn;
     if (conn->is_fast_mode()) {
-        // add back client->read_evt because we removed it before
-        add_event(conn->client->read_evt);
+        // add back client's read_evt because we removed it before
         del_event(server->write_evt);
+        add_event(conn->client->read_evt);
         LOG2("[%s] Added back client->read_evt\n", conn->client->addr.c_str());
     } else {
-
+        // TODO
     }
 
     // int count = server->filebuf->fetch(read_buffer, sizeof(read_buffer));

@@ -97,20 +97,15 @@ size_t Hybridbuf::_buf_read(char* result, size_t max_size) {
 
 /* ========================================================================= */
 
-struct io_stat Circularbuf::read_all_from(int fd) {
-    auto stat = read_all(fd, global_buffer, remaining_space());
-    if (stat.has_error && !(errno == EAGAIN || errno == EINTR)) {
-        ERROR("Read failed (#%d)", fd);
-    }
-    // copy to internal buffer
-    if (stat.nbytes > 0) {
-        auto remain = stat.nbytes;
-        size_t count = 0;
+size_t Circularbuf::copy_from(const char* data, size_t size) {
+    size_t remain = min(size, remaining_space());  // restricted by space
+    size_t count = 0;
+    if (remain > 0) {
         if (end_ptr >= start_ptr) {
             // copy towards right-end
             size_t space_to_rightend = buffer + sizeof(buffer) - end_ptr;
             count = min(remain, space_to_rightend);
-            memcpy(end_ptr, global_buffer, count);
+            memcpy(end_ptr, data, count);
             remain -= count;
             if (count < space_to_rightend) {
                 end_ptr += count;
@@ -120,10 +115,21 @@ struct io_stat Circularbuf::read_all_from(int fd) {
         }
         if (remain > 0) {
             // copy towards start_ptr
-            memcpy(end_ptr, global_buffer + count, remain);
+            memcpy(end_ptr, data + count, remain);
             end_ptr += remain;
+            count += remain;
         }
     }
+    return count;
+}
+
+struct io_stat Circularbuf::read_all_from(int fd) {
+    auto stat = read_all(fd, global_buffer, remaining_space());
+    if (stat.has_error && !(errno == EAGAIN || errno == EINTR)) {
+        ERROR("Read failed (#%d)", fd);
+    }
+    // copy to internal buffer
+    assert(copy_from(global_buffer, stat.nbytes) == stat.nbytes);
     return stat;
 }
 

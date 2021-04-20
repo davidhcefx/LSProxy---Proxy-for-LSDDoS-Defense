@@ -1,0 +1,53 @@
+diff --git a/src/native/api.c b/src/native/api.c
+index 4bd0e5a..31baa9d 100644
+--- a/src/native/api.c
++++ b/src/native/api.c
+@@ -113,7 +113,7 @@ void llhttp_settings_init(llhttp_settings_t* settings) {
+ }
+ 
+ 
+-llhttp_errno_t llhttp_finish(llhttp_t* parser) {
++llhttp_errno_t llhttp_finish(llhttp_t* parser, const char* data, size_t len) {
+   int err;
+ 
+   /* We're in an error state. Don't bother doing anything. */
+@@ -123,7 +123,7 @@ llhttp_errno_t llhttp_finish(llhttp_t* parser) {
+ 
+   switch (parser->finish) {
+     case HTTP_FINISH_SAFE_WITH_CB:
+-      CALLBACK_MAYBE(parser, on_message_complete, parser);
++      CALLBACK_MAYBE(parser, on_message_complete, parser, data, len);
+       if (err != HPE_OK) return err;
+ 
+     /* FALLTHROUGH */
+@@ -307,7 +307,7 @@ int llhttp__on_headers_complete(llhttp_t* s, const char* p, const char* endp) {
+ 
+ int llhttp__on_message_complete(llhttp_t* s, const char* p, const char* endp) {
+   int err;
+-  CALLBACK_MAYBE(s, on_message_complete, s);
++  CALLBACK_MAYBE(s, on_message_complete, s, p, endp - p);
+   return err;
+ }
+ 
+diff --git a/src/native/api.h b/src/native/api.h
+index 7fdbfc1..928c1e9 100644
+--- a/src/native/api.h
++++ b/src/native/api.h
+@@ -40,7 +40,7 @@ struct llhttp_settings_s {
+   llhttp_data_cb on_body;
+ 
+   /* Possible return values 0, -1, `HPE_PAUSED` */
+-  llhttp_cb      on_message_complete;
++  llhttp_data_cb on_message_complete;
+ 
+   /* When on_chunk_header is called, the current chunk length is stored
+    * in parser->content_length.
+@@ -131,7 +131,7 @@ llhttp_errno_t llhttp_execute(llhttp_t* parser, const char* data, size_t len);
+  * request was terminated safely. Otherwise a error code would be returned.
+  */
+ LLHTTP_EXPORT
+-llhttp_errno_t llhttp_finish(llhttp_t* parser);
++llhttp_errno_t llhttp_finish(llhttp_t* parser, const char* data, size_t len);
+ 
+ /* Returns `1` if the incoming message is parsed until the last byte, and has
+  * to be completed by calling `llhttp_finish()` on EOF

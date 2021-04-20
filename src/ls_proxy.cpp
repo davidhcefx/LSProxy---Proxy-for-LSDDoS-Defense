@@ -2,61 +2,83 @@
 
 
 struct event_base* evt_base;
+llhttp_settings_t parser_settings;
 char global_buffer[SOCK_IO_BUF_SIZE];  // buffer for each read operation
 queue<shared_ptr<Hybridbuf>> free_hybridbuf;
-// class variables
+/* class variables */
 char* Server::address;
 unsigned short Server::port;
 unsigned Server::connection_count = 0;
 
 
-Connection::Connection(): client{NULL}, server{NULL}, fast_mode{true} {}
-
-Connection::~Connection() {
-    if (server) delete server;
-    if (client) delete client;
+bool Connection::do_parse(const char* data, size_t size) {
+    auto err = llhttp_execute(parser, data, size);
+    if (err != HPE_OK) {
+        WARNING("Malformed packet; %s (%s)", parser->reason,
+                llhttp_errno_name(err));
+        // close connection, since we can't reliably parse request/response
+        free_server_and_parser();
+        if (client->queued_output_f->data_size() > 0) {
+            make_client_reply_only_mode();
+        } else {
+            delete this;
+        }
+        return false;
+    }
+    return true;
 }
 
 void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
-    // append to server's queued output
-    auto stat_c = server->queued_output_f->read_all_from(client->get_fd());
-    auto stat_s = server->queued_output_f->write_all_to(server->get_fd());
+    // read to global_buffer
+    Circularbuf* queue = server->queued_output_f;
+    auto stat_c = read_all(client->get_fd(), global_buffer,
+                           queue->remaining_space());
+    if (stat_c.has_error && !(errno == EAGAIN || errno == EINTR)) {
+        ERROR("Read failed");
+    }
+    client->keep_track_request_history(global_buffer, stat_c.nbytes);
+    // append to server's queued output, and write them out
+    assert(queue->copy_from(global_buffer, stat_c.nbytes) == stat_c.nbytes);
+    auto stat_s = queue->write_all_to(server->get_fd());
     LOG2("[%s] %lu >> QUEUE(%lu) >> %lu [SERVER]\n", client->addr.c_str(),
-         stat_c.nbytes, server->queued_output_f->data_size(), stat_s.nbytes);
+         stat_c.nbytes, queue->data_size(), stat_s.nbytes);
     if (stat_c.has_eof) {  // client closed
         delete this;
         return;
     }
     if (stat_s.nbytes == 0) {  // server unwritable
-        // disable client's read temporarily
+        // disable client's read_evt temporarily
         del_event(client->read_evt);
         add_event(server->write_evt);
     }
 }
 
 void Connection::fast_forward(Server*/*server*/, Client*/*client*/) {
-    // append to client's queued output
+    // append to client's queued output, and write them out
     auto stat_s = client->queued_output_f->read_all_from(server->get_fd());
     auto stat_c = client->queued_output_f->write_all_to(client->get_fd());
     LOG2("[%s] %lu << QUEUE(%lu) << %lu [SERVER]\n", client->addr.c_str(),
          stat_c.nbytes, client->queued_output_f->data_size(), stat_s.nbytes);
     if (stat_s.has_eof) {  // server closed
+        free_server_and_parser();
         if (client->queued_output_f->data_size() > 0) {
-            // TODO(davidhcefx): change to use Filebuf to prevent read attack
-            // wait for the remaining msg to be replied
-            delete server;
-            server = NULL;
-            add_event(client->write_evt);
+            make_client_reply_only_mode();
         } else {
             delete this;
         }
         return;
     }
     if (stat_c.nbytes == 0) {  // client unwritable
-        // disable server's read temporily
+        // disable server's read_evt temporily
         del_event(server->read_evt);
         add_event(client->write_evt);
     }
+}
+
+void Connection::make_client_reply_only_mode() {
+    // TODO(davidhcefx): use Filebuf or set timeout to prevent read attack
+    del_event(client->read_evt);
+    add_event(client->write_evt);
 }
 
 void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
@@ -181,7 +203,7 @@ int connect_TCP(const char* host, unsigned short port) {
         memcpy(&addr, info->ai_addr, sizeof(addr));
         freeaddrinfo(info);
     } else if ((addr.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE) {
-        ERROR_EXIT("Cannot resolve host addr: %s\n", host);
+        ERROR_EXIT("Cannot resolve host addr: %s", host);
     }
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
@@ -208,6 +230,7 @@ int main(int argc, char* argv[]) {
     Server::port = atoi(argv[2]);
     unsigned short port = (argc >= 4) ? atoi(argv[3]) : 8080;
 
+    // create fds
     raise_open_file_limit(MAX_FILE_DESC);
     int master_sock = passive_TCP(port);  // fd should be 3
     for (int i = 0; i < MAX_HYBRIDBUF; i++) {
@@ -215,6 +238,8 @@ int main(int argc, char* argv[]) {
     }
     assert(free_hybridbuf.back()->get_fd() == 3 + MAX_HYBRIDBUF);
 
+    llhttp_settings_init(&parser_settings);
+    parser_settings.on_message_complete = ?
     evt_base = event_base_new();
     add_event(new_read_event(master_sock, Connection::accept_new));
     if (signal(SIGINT, break_event_loop) == SIG_ERR) {
