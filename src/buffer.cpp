@@ -24,6 +24,7 @@ void Filebuf::clear() {
         }
     }
     rewind();
+    LOG3("Filebuf: Cleared '%s'\n", file_name.c_str());
 }
 
 void Filebuf::_file_write(const char* data, size_t size) {
@@ -42,7 +43,7 @@ void Filebuf::_file_write(const char* data, size_t size) {
         WARNING("%lu bytes could not be written and were lost", remain);
     }
     data_size += size - remain;
-    LOG2("Wrote %lu bytes to '%s'\n", size - remain, file_name.c_str());
+    LOG2("Filebuf: Wrote %lu bytes (#%d)\n", size - remain, fd);
 }
 
 /* ========================================================================= */
@@ -75,7 +76,7 @@ size_t Hybridbuf::_buf_write(const char* data, size_t size) {
         memcpy(buffer + next_pos, data, size);
         next_pos += size;
         data_size += size;
-        LOG2("Buffer occupied %lu bytes out of %lu\n", size, space);
+        LOG2("Hybridbuf: Occupied %lu / %lu bytes.\n", size, space);
         return size;
     } else {
         return 0;
@@ -88,7 +89,7 @@ size_t Hybridbuf::_buf_read(char* result, size_t max_size) {
         size = min(size, max_size);  // restricted by max_size
         memcpy(result, buffer + next_pos, size);
         next_pos += size;
-        LOG2("Buffer read %lu bytes\n", size);
+        LOG2("Hybridbuf: Read %lu bytes\n", size);
         return size;
     } else {
         return 0;
@@ -120,6 +121,7 @@ size_t Circularbuf::copy_from(const char* data, size_t size) {
             count += remain;
         }
     }
+    LOG3("Circularbuf: Occupied %lu bytes.\n", count);
     return count;
 }
 
@@ -158,5 +160,6 @@ struct io_stat Circularbuf::write_all_to(int fd) {
         }
     }
     stat.nbytes = orig_data_size - data_size();
+    LOG3("Circularbuf: Read %lu bytes.\n", stat.nbytes);
     return stat;
 }

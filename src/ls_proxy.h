@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <event2/event.h>
@@ -25,8 +26,9 @@
 #define SOCK_IO_BUF_SIZE  10  // 10 * 1024  // socket io buffer (KB)
 #define HIST_CACHE_SIZE   8 // 8 * 1024  // in-mem cache for request history (KB)
 // #define CRLF              "\r\n"
-#define LOG_LEVEL_1
-#define LOG_LEVEL_2
+#define LOG_LEVEL_1       // basic connection info
+#define LOG_LEVEL_2       // kind of noisy
+#define LOG_LEVEL_3       // very verbose
 #ifdef  LOG_LEVEL_1
 #define LOG1(...)         {printf(__VA_ARGS__);}
 #else
@@ -37,6 +39,11 @@
 #else
 #define LOG2(...)         {}
 #endif  // LOG_LEVEL_2
+#ifdef  LOG_LEVEL_3
+#define LOG3(...)         {printf(__VA_ARGS__);}
+#else
+#define LOG3(...)         {}
+#endif  // LOG_LEVEL_3
 #define WARNING(fmt, ...) {fprintf(stderr, "[Warning] " fmt "\n" __VA_OPT__(,) \
                                    __VA_ARGS__);}
 #define ERROR(fmt, ...)   {fprintf(stderr, "[Error] " fmt ": %s\n" __VA_OPT__(,) \
@@ -48,6 +55,7 @@ using std::shared_ptr;
 using std::make_shared;
 using std::queue;
 using std::min;
+using std::exception;
 
 /**
  * SPECIFICATION:
@@ -75,8 +83,6 @@ using std::min;
  *     them once each request completed.
  * [Timeout] To prevent legitimate connections from been recognized as suspicious,
  *     we set keep-alive timeout short and close client connection if timeout.
- *     > Injecting a 'Keep-Alive: timeout' header might prevent TCP reset
- *       issues, but would mess up with the original response.
  *
  * FILE DESCRIPTOR MAP: (n=MAX_CONNECTION)
  *     0 ~ 3    stdin, stdout, stderr, master_sock
@@ -87,12 +93,12 @@ using std::min;
  * Progress:
  * [x] Event-based arch.
  * [x] Fast-mode
- * [ ] History temp
+ * [x] History temp
  * [ ] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
  * [ ] Transfer rate monitor
  * [ ] Transition logic
  * [-] Shorter keep-alive timeout
- * [-] Detect server down
+ * [x] Detect server down
  */
 
 
@@ -102,6 +108,9 @@ struct io_stat {
     bool has_eof;   // when read returns 0
     io_stat(): nbytes{0}, has_error{false}, has_eof{false} {}
 };
+
+class ParserError: public exception {};
+class ConnectionError: public exception {};
 
 
 /* class for using a file as buffer */
@@ -192,16 +201,16 @@ class Circularbuf {
 };
 
 
-class Connection;
 extern llhttp_settings_t parser_settings;
 extern char global_buffer[SOCK_IO_BUF_SIZE];
 extern queue<shared_ptr<Hybridbuf>> free_hybridbuf;
+class Connection;
 
 /* class for handling client io */
 class Client {
  public:
     string addr;
-    Connection* conn;        // TODO: is it worth using shared_ptr?
+    Connection* conn;
     struct event* read_evt;  // both events have ptr keeping track of *this
     struct event* write_evt;
     Circularbuf* queued_output_f;  // queued output for fast-mode
@@ -214,7 +223,7 @@ class Client {
     // close socket, delete the events and release Hybridbuf
     ~Client();
     int get_fd() {return event_get_fd(read_evt);}
-    // keep incomplete requests to history; clear history when completed
+    // keep track incomplete requests; throw ParserError
     void keep_track_request_history(const char* data, size_t size);
     // upon completed, forward each request to server one at a time
     void recv_to_buffer_slowly(int fd);
@@ -243,7 +252,7 @@ class Server {
     Circularbuf* queued_output_f;  // queued output for fast-mode
     Filebuf* response_buf_s;       // response buffer for slow-mode
 
-    // create the events and connect to server
+    // create the events and connect to server; throw ConnectionError
     explicit Server(Connection* _conn);
     // close socket and delete the events
     ~Server();
@@ -271,23 +280,26 @@ class Server {
 /* class for handling connections */
 class Connection {
  public:
-    Client* client;  // TODO: can we change to shared_ptr?
+    Client* client;
     Server* server;
 
     Connection(): client{NULL}, server{NULL}, parser{NULL}, fast_mode{true} {}
     ~Connection() { _delete_server(); _delete_client(); _delete_parser(); }
     bool is_fast_mode() { return fast_mode; }
-    void set_slow_mode() { fast_mode = false; }
+    void set_slow_mode() {
+        fast_mode = false;
+        LOG2("[%s] Connection been set to slow mode\n", client->addr.c_str());
+    }
     bool parser_uninitialized() { return parser == NULL; }
     // allocate a new parser and reset it
     void init_parser() { parser = new llhttp_t; reset_parser(); }
     // call it before changing from parsing requests to responses
     void reset_parser() { llhttp_init(parser, HTTP_BOTH, &parser_settings); }
-    // invoke callbacks along the way; close conn when error
-    bool do_parse(const char* data, size_t size);
-    // get ptr to the start of cur request or NULL; set parser->data to NULL
-    char* get_cur_request_start() { return _get_cur_msg_start(); }
-    char* get_cur_response_start() { return _get_cur_msg_start(); }
+    // invoke callbacks along the way; throw ParserError
+    void do_parse(const char* data, size_t size);
+    // points next to the end of last request or NULL; set parser->data to NULL
+    char* get_last_request_end() { return _get_last_msg_end(); }
+    char* get_last_response_end() { return _get_last_msg_end(); }
     // forward client's msg to server; close server when client closed
     void fast_forward(Client*/*client*/, Server*/*server*/);
     // forward server's msg to client; put client to reply-only mode when server closed
@@ -302,11 +314,11 @@ class Connection {
     llhttp_t* parser;  // each connection shares a parser
     bool fast_mode;
 
-    void _delete_server() { if (server) { delete server; server = NULL; } }
     void _delete_client() { if (client) { delete client; client = NULL; } }
+    void _delete_server() { if (server) { delete server; server = NULL; } }
     void _delete_parser() { if (parser) { delete parser; parser = NULL; } }
-    // get ptr to the start of cur msg or NULL; set parser->data to NULL
-    char* _get_cur_msg_start() {
+    // points next to the end of last msg or NULL; set parser->data to NULL
+    char* _get_last_msg_end() {
         auto ptr = (char*)parser->data;
         parser->data = NULL;
         return ptr;
@@ -316,12 +328,12 @@ class Connection {
 
 /* Utility functions */
 // replace all newlines with dashes
-inline char* replace_newlines(char* str) {
-    for (char* ptr = strchr(str, '\n'); ptr; ptr = strchr(ptr, '\n')) {
-        *ptr = '_';
-    }
-    return str;
-}
+// inline char* replace_newlines(char* str) {
+//     for (char* ptr = strchr(str, '\n'); ptr; ptr = strchr(ptr, '\n')) {
+//         *ptr = '_';
+//     }
+//     return str;
+// }
 
 inline char* get_host(const struct sockaddr_in& addr) {
     return inet_ntoa(addr.sin_addr);
@@ -331,13 +343,20 @@ inline int get_port(const struct sockaddr_in& addr) {
     return ntohs(addr.sin_port);
 }
 
+// return in format host:port
+inline string get_host_and_port(const struct sockaddr_in& addr) {
+    return string(get_host(addr)) + ":" + to_string(get_port(addr));
+}
+
 inline int make_file_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
-// return in format host:port
-string get_host_and_port(const struct sockaddr_in& addr);
+// shutdown write; wait 30 seconds (async) for FIN packet to arrive
+void close_socket_gracefully(int fd);
+// consume input; when timeout close fd and remove event
+void close_after_timeout(int fd, short flag, void* arg);
 // read as much as possible
 struct io_stat read_all(int fd, char* buffer, size_t max_size);
 // write as much as possible
@@ -348,8 +367,18 @@ void raise_open_file_limit(size_t value);
 size_t reply_with_503_unavailable(int sock);
 // return master socket Fd
 int passive_TCP(unsigned short port, int qlen = 128);
-// return socket Fd; host can be either hostname or IP address.
+// return socket Fd; host can be either hostname or IP address
 int connect_TCP(const char* host, unsigned short port);
+// signal handler
+void break_event_loop(int/*sig*/);
+// signal handler
+void put_all_connection_slow_mode(int/*sig*/);
+// event_base callback
+int put_slow_mode(const struct event_base*, const struct event*, void*);
+// event_base callback
+int close_event_fd(const struct event_base*, const struct event*, void*);
+// parser callback
+int message_complete_cb(llhttp_t* parser, const char* at, size_t length);
 
 /* Event wrappers */
 extern struct event_base* evt_base;
@@ -361,8 +390,8 @@ inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = N
     return event_new(evt_base, fd, EV_WRITE | EV_PERSIST, cb, arg);
 }
 
-inline void add_event(struct event* evt) {
-    if (event_add(evt, NULL) < 0) {
+inline void add_event(struct event* evt, const struct timeval* timeout = NULL) {
+    if (event_add(evt, timeout) < 0) {
         ERROR_EXIT("Cannot add event");
     }    
 }
@@ -374,15 +403,6 @@ inline void del_event(struct event* evt) {
 }
 
 inline void free_event(struct event* evt) { event_free(evt); }
-
-// signal handler
-inline void break_event_loop(int/*sig*/) { event_base_loopbreak(evt_base); }
-
-// event_base callback
-inline int close_event_connection(const struct event_base*,
-                                  const struct event* evt, void*/*arg*/) {
-    return close(event_get_fd(evt));
-}
 
 
 #endif  // SRC_LS_PROXY_H_

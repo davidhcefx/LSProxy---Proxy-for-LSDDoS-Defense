@@ -5,6 +5,10 @@ Server::Server(Connection* _conn):
     conn{_conn}, queued_output_f{new Circularbuf()}, response_buf_s{NULL}
 {
     int sock = connect_TCP(Server::address, Server::port);
+    if (sock < 0) {
+        WARNING("Server down or having network issue.");
+        throw ConnectionError();
+    }
     if (evutil_make_socket_nonblocking(sock) < 0) {
         ERROR_EXIT("Cannot make socket nonblocking");
     }
@@ -14,8 +18,8 @@ Server::Server(Connection* _conn):
 }
 
 Server::~Server() {
-    LOG2("Connection closed: [SERVER] (active: %d)\n", --Server::connection_count);
-    close(get_fd());
+    LOG2("Connection closed: [SERVER] (active: %u)\n", --Server::connection_count);
+    close_socket_gracefully(get_fd());
     del_event(read_evt);
     del_event(write_evt);
     free_event(read_evt);
@@ -65,18 +69,8 @@ void Server::on_writable(int/*fd*/, short/*flag*/, void* arg) {
         // add back client's read_evt because we removed it before
         del_event(server->write_evt);
         add_event(conn->client->read_evt);
-        LOG2("[%s] Added back client->read_evt\n", conn->client->addr.c_str());
+        LOG2("[%s] Server writable again.\n", conn->client->addr.c_str());
     } else {
         // TODO
     }
-
-    // int count = server->filebuf->fetch(read_buffer, sizeof(read_buffer));
-    // if (count <= 0) {
-    //     // done forwarding
-    //     del_event(server->write_evt);
-    //     server->filebuf->clear();
-    //     add_event(server->read_evt);
-    // }
-    // write(fd, read_buffer, count);
-    // LOG2("%11d bytes >> [SERVER]\n", count);
 }

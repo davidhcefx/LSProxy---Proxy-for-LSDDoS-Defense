@@ -13,7 +13,7 @@ Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
 
 Client::~Client() {
     LOG1("Connection closed: [%s]\n", addr.c_str());
-    close(get_fd());
+    close_socket_gracefully(get_fd());
     del_event(read_evt);
     del_event(write_evt);
     free_event(read_evt);
@@ -24,12 +24,14 @@ Client::~Client() {
 }
 
 void Client::keep_track_request_history(const char* data, size_t size) {
-    if (!conn->do_parse(data, size)) return;  // parser error
-    auto start_ptr = conn->get_cur_request_start();
-    if (data <= start_ptr && start_ptr < data + size) {
+    conn->do_parse(data, size);
+    auto end_ptr = conn->get_last_request_end();
+    if (data < end_ptr && end_ptr <= data + size) {
         // start a new recording
         request_history->clear();
-        request_history->store(start_ptr, size - (start_ptr - data));
+        request_history->store(end_ptr, size - (end_ptr - data));
+        LOG2("History: Starts new record from '%s'\n",
+             end_ptr < data + size ? end_ptr : "EOL");
     } else {
         request_history->store(data, size);
     }
@@ -68,8 +70,14 @@ void Client::on_readable(int fd, short/*flag*/, void* arg) {
     auto conn = client->conn;
     if (conn->is_fast_mode()) {
         if (conn->parser_uninitialized()) {
+            try {
+                conn->server = new Server(conn);
+            } catch (ConnectionError& err) {
+                reply_with_503_unavailable(fd);
+                delete conn;
+                return;
+            }
             conn->init_parser();
-            conn->server = new Server(conn);
             client->queued_output_f = new Circularbuf();
             add_event(conn->server->read_evt);
         }
@@ -92,27 +100,9 @@ void Client::on_writable(int/*fd*/, short/*flag*/, void* arg) {
             // add back server's read_evt because we removed it before
             del_event(client->write_evt);
             add_event(conn->server->read_evt);
-            LOG2("[%s] Added back server->read_evt\n", client->addr.c_str());
+            LOG2("[%s] Client writable again.\n", client->addr.c_str());
         }
     } else {
         // TODO
     }
-
-//     int count = client->filebuf->fetch(read_buffer, sizeof(read_buffer));
-//     if (count <= 0) {
-//         // done replying
-//         if (client->server) {
-//             delete client->server;
-//         }
-//         delete client;
-//         return;
-//     }
-//     write(fd, read_buffer, count);
-// #ifdef LOG_LEVEL_2
-//     char buf[51];
-//     int n = min(count, 50);
-//     memcpy(buf, read_buffer, n);
-//     buf[n] = '\0';
-//     LOG2("[%s] << '%s'...\n", client->addr.c_str(), replace_newlines(buf));
-// #endif
 }
