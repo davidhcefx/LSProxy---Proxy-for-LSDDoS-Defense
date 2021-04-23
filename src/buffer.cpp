@@ -27,6 +27,17 @@ void Filebuf::clear() {
     LOG3("Filebuf: Cleared '%s'\n", file_name.c_str());
 }
 
+static void Filebuf::copy_data(const Filebuf* source, Filebuf* dest) {
+    dest->clear();  // clear before storing
+    source->rewind();
+    while (true) {
+        auto count = source->fetch(global_buffer, sizeof(global_buffer));
+        if (count == 0) break;  // EOF reached
+        if (count < 0 && errno != EAGAIN && errno != EINTR) break;
+        dest->store(global_buffer, count);
+    }
+}
+
 void Filebuf::_file_write(const char* data, size_t size) {
     auto remain = size;
     for (auto i = 0; i < 10 && remain > 0; i++) {  // try 10 times
@@ -121,13 +132,14 @@ size_t Circularbuf::copy_from(const char* data, size_t size) {
             count += remain;
         }
     }
-    LOG3("Circularbuf: Occupied %lu bytes.\n", count);
+    // LOG3("Circularbuf: Occupied %lu / %lu bytes.\n", count,
+    //      count + remaining_space());
     return count;
 }
 
 struct io_stat Circularbuf::read_all_from(int fd) {
     auto stat = read_all(fd, global_buffer, remaining_space());
-    if (stat.has_error && !(errno == EAGAIN || errno == EINTR)) {
+    if (stat.has_error && errno != EAGAIN && errno != EINTR) {
         ERROR("Read failed (#%d)", fd);
     }
     // copy to internal buffer
@@ -160,6 +172,10 @@ struct io_stat Circularbuf::write_all_to(int fd) {
         }
     }
     stat.nbytes = orig_data_size - data_size();
-    LOG3("Circularbuf: Read %lu bytes.\n", stat.nbytes);
+    // LOG3("Circularbuf: Read %lu bytes.\n", stat.nbytes);
     return stat;
+}
+
+struct io_stat Circularbuf::write_all_to(Filebuf* filebuf) {
+
 }

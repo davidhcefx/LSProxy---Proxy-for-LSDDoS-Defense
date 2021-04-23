@@ -2,109 +2,23 @@
 
 
 struct event_base* evt_base;
-llhttp_settings_t parser_settings;
 char global_buffer[SOCK_IO_BUF_SIZE];  // buffer for each read operation
 queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 /* class variables */
 char* Server::address;
 unsigned short Server::port;
 unsigned Server::connection_count = 0;
+llhttp_settings_t Parser::settings;
 
 
-void Connection::do_parse(const char* data, size_t size) {
+void HttpParser::do_parse(const char* data, size_t size) {
+    first_eom = last_eom = NULL;  // reset end-of-msg pointers
     auto err = llhttp_execute(parser, data, size);
     if (err != HPE_OK) {
         WARNING("Malformed packet; %s (%s)", parser->reason,
                 llhttp_errno_name(err));
         throw ParserError();
     }
-}
-
-void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
-    // read to global_buffer for history
-    Circularbuf* queue = server->queued_output_f;
-    auto stat_c = read_all(client->get_fd(), global_buffer,
-                           queue->remaining_space());
-    if (stat_c.has_error && !(errno == EAGAIN || errno == EINTR)) {
-        ERROR("Read failed");
-    }
-    try {
-        client->keep_track_request_history(global_buffer, stat_c.nbytes);
-    } catch (ParserError& err) {
-        // close connection, since we can't reliably parse requests
-        free_server_and_parser();
-        if (client->queued_output_f->data_size() > 0) {
-            make_client_reply_only_mode();
-        } else {
-            delete this;
-        }
-        return;
-    }
-    // append to server's queued output, and write them out
-    assert(queue->copy_from(global_buffer, stat_c.nbytes) == stat_c.nbytes);
-    auto stat_s = queue->write_all_to(server->get_fd());
-    LOG2("[%s] %6lu >>>> queue(%lu) >>>> %-6lu [SERVER]\n", client->addr.c_str(),
-         stat_c.nbytes, queue->data_size(), stat_s.nbytes);
-    if (stat_c.has_eof) {  // client closed
-        delete this;
-        return;
-    }
-    if (stat_s.nbytes == 0) {  // server unwritable
-        // disable client's read_evt temporarily
-        del_event(client->read_evt);
-        add_event(server->write_evt);
-        LOG2("[%s] Server temporarily unwritable.\n", client->addr.c_str());
-    }
-}
-
-void Connection::fast_forward(Server*/*server*/, Client*/*client*/) {
-    // append to client's queued output, and write them out
-    auto stat_s = client->queued_output_f->read_all_from(server->get_fd());
-    auto stat_c = client->queued_output_f->write_all_to(client->get_fd());
-    LOG2("[%s] %6lu <<<< queue(%lu) <<<< %-6lu [SERVER]\n", client->addr.c_str(),
-         stat_c.nbytes, client->queued_output_f->data_size(), stat_s.nbytes);
-    if (stat_s.has_eof) {  // server closed
-        free_server_and_parser();
-        if (client->queued_output_f->data_size() > 0) {
-            make_client_reply_only_mode();
-        } else {
-            delete this;
-        }
-        return;
-    }
-    if (stat_c.nbytes == 0) {  // client unwritable
-        // disable server's read_evt temporily
-        del_event(server->read_evt);
-        add_event(client->write_evt);
-        LOG2("[%s] Client temporarily unwritable.\n", client->addr.c_str());
-    }
-}
-
-void Connection::make_client_reply_only_mode() {
-    // TODO(davidhcefx): use Filebuf or set timeout to prevent read attack
-    del_event(client->read_evt);
-    add_event(client->write_evt);
-    LOG3("[%s] Client been set to reply-only mode.\n", client->addr.c_str());
-}
-
-void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
-    struct sockaddr_in addr;
-    socklen_t addr_len = sizeof(addr);
-    int sock = accept(master_sock, (struct sockaddr*)&addr, &addr_len);
-    if (evutil_make_socket_nonblocking(sock) < 0) {
-        ERROR_EXIT("Cannot make socket nonblocking");
-    }
-    if (free_hybridbuf.empty()) {
-        WARNING("Max connection <%d> reached", MAX_CONNECTION);
-        reply_with_503_unavailable(sock);
-        LOG1("Connection closed: [%s]\n", get_host_and_port(addr).c_str());
-        close_socket_gracefully(sock);
-        return;
-    }
-    Connection* conn = new Connection();
-    conn->client = new Client(sock, addr, conn);
-    add_event(conn->client->read_evt);
-    LOG1("Connected by [%s]\n", conn->client->addr.c_str());
 }
 
 void close_socket_gracefully(int fd) {
@@ -115,7 +29,7 @@ void close_socket_gracefully(int fd) {
     if (read(fd, global_buffer, 1) == 0) {  // FIN arrived
         close(fd);
     } else {
-        struct timeval timeout = { .tv_sec = 30, .tv_usec = 0 };
+        struct timeval timeout = {.tv_sec = SOCK_CLOSE_TIMEOUT, .tv_usec = 0};
         auto evt = new_read_event(fd, close_after_timeout, event_self_cbarg());
         add_event(evt, &timeout);
     }
@@ -266,6 +180,7 @@ int put_slow_mode(const struct event_base*, const struct event* evt, void*) {
     } else if (cb == Server::on_readable || cb == Server::on_writable) {
         ((Server*)arg)->conn->set_slow_mode();
     }  // else can also be other things
+    return 0;
 }
 
 int close_event_fd(const struct event_base*, const struct event* evt, void*) {
@@ -273,7 +188,12 @@ int close_event_fd(const struct event_base*, const struct event* evt, void*) {
 }
 
 int message_complete_cb(llhttp_t* parser, const char* at, size_t/*len*/) {
-    parser->data = (void*)at;  // at should points next to end of msg
+    auto h_parser = (HttpParser*)parser->data;
+    // keep track of *at, which points next to the end of message
+    if (h_parser->first_end_of_msg_not_set()) {
+        h_parser->set_first_end_of_msg(at);
+    }
+    h_parser->set_last_end_of_msg(at);
     return 0;
 }
 
@@ -298,8 +218,8 @@ int main(int argc, char* argv[]) {
     assert(free_hybridbuf.back()->get_fd() == 3 + MAX_HYBRIDBUF);
 
     // setup parser
-    llhttp_settings_init(&parser_settings);
-    parser_settings.on_message_complete = message_complete_cb;
+    llhttp_settings_init(&HttpParser::settings);
+    HttpParser::settings.on_message_complete = message_complete_cb;
     // setup signal handlers
     if (signal(SIGINT, break_event_loop) == SIG_ERR) {
         ERROR_EXIT("Cannot setup SIGINT handler");
