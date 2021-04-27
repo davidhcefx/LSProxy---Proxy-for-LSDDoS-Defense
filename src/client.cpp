@@ -44,18 +44,32 @@ void Client::recv_to_buffer_slowly(int fd) {
     if (end_ptr) {  // at least one completed
         // store first msg to request_buf, the remaining to request_tmp_buf
         size_t size = end_ptr - global_buffer;
-        client->request_buf->store(global_buffer, size);
-        client->request_tmp_buf->store(end_ptr, stat.nbytes - size);
+        request_buf->store(global_buffer, size);
+        request_tmp_buf->store(end_ptr, stat.nbytes - size);
         // pause client, rewind buffers and interact with server
-        client->pause_rw();
-        client->request_buf->rewind();  // for further reads
-        // TODO: response_buf
+        pause_rw();
+        request_buf->rewind();  // for further reads
         conn->parser->switch_to_response_mode();
         conn->server = new Server(conn);
         add_event(conn->server->write_evt);
         add_event(conn->server->read_evt);
     } else {
-        client->request_buf->store(global_buffer, stat.nbytes);
+        request_buf->store(global_buffer, stat.nbytes);
+        LOG2("[%s] %6lu >>>> request\n", addr.c_str(), stat.nbytes);
+    }
+}
+
+void Client::send_response_slowly(int fd) {
+    auto count = response_buf->fetch(global_buffer, sizeof(global_buffer));
+    if (count > 0) {
+        auto stat = write_all(fd, global_buffer, count);
+        if (stat.nbytes < (size_t)count) {
+            response_buf->rewind(count - stat.nbytes);
+        }
+        LOG2("[%s] %6lu <<<< response\n", addr.c_str(), \
+             count - stat.nbytes);
+    } else if (count == 0) {  // no data to forward
+        del_event(write_evt);
     }
 }
 
@@ -108,14 +122,16 @@ void Client::on_writable(int fd, short/*flag*/, void* arg) {
                 delete conn;
             }
         } else {
-            // add back server's read_evt because we removed it before
-            del_event(client->write_evt);
+            // add back server's recv because we removed it before
             add_event(conn->server->read_evt);
-            LOG2("[%s] Client writable again.\n", client->addr.c_str());
+            del_event(client->write_evt);
+            // write some
+            auto stat = client->queued_output->write_all_to(fd);
+            LOG2("[%s] %6lu <<<< queue(%lu)\n", client->addr.c_str(),
+                 stat.nbytes, client->queued_output->data_size());
         }
     } else {
         /* Slow mode */
-        // reply with response
-        client->response_buf
+        client->send_response_slowly(fd);
     }
 }

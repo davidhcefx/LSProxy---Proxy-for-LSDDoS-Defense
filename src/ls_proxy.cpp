@@ -8,13 +8,13 @@ queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 char* Server::address;
 unsigned short Server::port;
 unsigned Server::connection_count = 0;
-llhttp_settings_t Parser::settings;
+llhttp_settings_t HttpParser::settings;
 
 
 void HttpParser::do_parse(const char* data, size_t size) {
     first_eom = last_eom = NULL;  // reset end-of-msg pointers
     auto err = llhttp_execute(parser, data, size);
-    if (err != HPE_OK) {
+    if (err != HPE_OK) { [[unlikely]]
         WARNING("Malformed packet; %s (%s)", parser->reason,
                 llhttp_errno_name(err));
         throw ParserError();
@@ -24,12 +24,12 @@ void HttpParser::do_parse(const char* data, size_t size) {
 void close_socket_gracefully(int fd) {
     if (shutdown(fd, SHUT_WR) < 0) ERROR_EXIT("Shutdown error");
     while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {
-        // consume input
+        /* consume input */
     }
     if (read(fd, global_buffer, 1) == 0) {  // FIN arrived
         close(fd);
     } else {
-        struct timeval timeout = {.tv_sec = SOCK_CLOSE_TIMEOUT, .tv_usec = 0};
+        struct timeval timeout = {.tv_sec = SOCK_CLOSE_WAITTIME, .tv_usec = 0};
         auto evt = new_read_event(fd, close_after_timeout, event_self_cbarg());
         add_event(evt, &timeout);
     }
@@ -124,13 +124,13 @@ int passive_TCP(unsigned short port, int qlen) {
     };
     int sockFd;
 
-    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot create socket");
     }
-    if (bind(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    if (bind(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot bind to port %d", port);
     }
-    if (listen(sockFd, qlen) < 0) {
+    if (listen(sockFd, qlen) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot listen");
     }
     LOG1("Listening on port %d...\n", port);
@@ -152,7 +152,7 @@ int connect_TCP(const char* host, unsigned short port) {
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
 
-    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot create socket");
     }
     if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {  // TODO(davidhcefx): non-blocking connect
@@ -210,7 +210,7 @@ int main(int argc, char* argv[]) {
     unsigned short port = (argc >= 4) ? atoi(argv[3]) : 8080;
 
     // occupy fds
-    raise_open_file_limit(MAX_FILE_DESC);
+    raise_open_file_limit(MAX_FILE_DSC);
     int master_sock = passive_TCP(port);  // fd should be 3
     for (int i = 0; i < MAX_HYBRIDBUF; i++) {
         free_hybridbuf.push(make_shared<Hybridbuf>());
@@ -222,10 +222,10 @@ int main(int argc, char* argv[]) {
     HttpParser::settings.on_message_complete = message_complete_cb;
     // setup signal handlers
     if (signal(SIGINT, break_event_loop) == SIG_ERR) {
-        ERROR_EXIT("Cannot setup SIGINT handler");
+        ERROR_EXIT("Cannot set SIGINT handler");
     }
     if (signal(SIGUSR1, put_all_connection_slow_mode) == SIG_ERR) {
-        ERROR("Cannot setup SIGUSR1 handler");
+        ERROR("Cannot set SIGUSR1 handler");
     }
 
     // run event loop

@@ -16,13 +16,14 @@ using namespace std;
 string host_header;  // HTTP header Host
 
 // Return socket Fd; host can be either hostname or IP address.
-int connectTCP(const char* host, unsigned short port) {
+int connect_TCP(const char* host, unsigned short port) {
     struct sockaddr_in addr;
     struct addrinfo* info;
     int sockFd;
 
     if (getaddrinfo(host, NULL, NULL, &info) == 0) {
         memcpy(&addr, info->ai_addr, sizeof(addr));
+        freeaddrinfo(info);
     } else if ((addr.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE) {
         error("Cannot resolve host addr: %s\n", host);
     }
@@ -33,8 +34,8 @@ int connectTCP(const char* host, unsigned short port) {
         error("Cannot create socket: %s\n", ERRNOSTR);
     }
     if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {
-        error("Cannot connect to %s (%d): %s\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port), \
-            ERRNOSTR);
+        error("Cannot connect to %s (%d): %s\n", inet_ntoa(addr.sin_addr), \
+              ntohs(addr.sin_port), ERRNOSTR);
     }
     printf("Connected to %s (%d)\n", inet_ntoa(addr.sin_addr), ntohs(addr.sin_port));
     return sockFd;
@@ -130,7 +131,7 @@ int main(int argc, char* argv[]) {
     host_header = "Host: " + string(argv[1]) + ":" + string(argv[2]) + "\r\n";
     int body_size = (argc >= 4) ? atoi(argv[3]) * 1024 : 1024 * 1024;
 
-    int sock = connectTCP(argv[1], atoi(argv[2]));
+    int sock = connect_TCP(argv[1], atoi(argv[2]));
 
     // get_attack(sock);
     post_attack(sock, body_size / 600, true);

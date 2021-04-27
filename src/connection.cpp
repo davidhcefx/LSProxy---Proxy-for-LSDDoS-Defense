@@ -2,32 +2,30 @@
 
 
 void Connection::set_slow_mode() {
+    LOG2("[%s] Connection setting to slow mode...\n", client->addr.c_str());
     fast_mode = false;
     in_transition = true;
     client->request_buf = new Filebuf();
     client->request_tmp_buf = new Filebuf();
-    client->response_buf = new Filebuf();
+    client->response_buf = new FIFOfilebuf();
 
     // pause client, wait until server finished its msg then close server
     client->pause_rw();
-    del_and_reAdd_event(server->read_evt, 10);   // attach a 10s timeout
+    struct timeval timeout = {.tv_sec = TRANSIT_TIMEOUT, .tv_usec = 0};
+    del_event(server->read_evt);
+    add_event(server->read_evt, &timeout);  // attach a timeout to recv
     if (server->queued_output->data_size() > 0) {
         add_event(server->write_evt);
+    } else {
+        server->free_queued_output();
     }
 
-    // retrieve current request
+    // retrieve previous requests and decommission fast-mode queue
     client->copy_history_to(client->request_buf);
-    // decommission fast-mode queue
     while (client->queued_output->data_size() > 0) {
-        auto st = client->queued_output->write_all_to(client->response_buf);
-        if (st.has_error && errno != EAGAIN && errno != EINTR) {
-            ERROR("Write failed (#%d)", client->response_buf->get_fd());
-            break;
-        }
+        client->queued_output->dump_to(client->response_buf);
     }
-    delete client->queued_output;
-    client->queued_output = NULL;
-    LOG2("[%s] Connection been set to slow mode.\n", client->addr.c_str());
+    client->free_queued_output();
 }
 
 void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
@@ -35,7 +33,7 @@ void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
     Circularbuf* queue = server->queued_output;
     auto stat_c = read_all(client->get_fd(), global_buffer,
                            queue->remaining_space());
-    if (stat_c.has_error && errno != EAGAIN && errno != EINTR) {
+    if (stat_c.has_error && errno != EAGAIN && errno != EINTR) { [[unlikely]]
         ERROR("Read failed");
     }
     try {
@@ -61,7 +59,7 @@ void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
         return;
     }
     if (stat_s.nbytes == 0) {  // server unwritable
-        // disable client's read_evt temporarily
+        // disable client's recv temporarily
         del_event(client->read_evt);
         add_event(server->write_evt);
         LOG2("[%s] Server temporarily unwritable.\n", client->addr.c_str());
@@ -85,7 +83,7 @@ void Connection::fast_forward(Server*/*server*/, Client*/*client*/) {
         return;
     }
     if (stat_c.nbytes == 0) {  // client unwritable
-        // disable server's read_evt temporily
+        // disable server's recv temporily
         del_event(server->read_evt);
         add_event(client->write_evt);
         LOG2("[%s] Client temporarily unwritable.\n", client->addr.c_str());
@@ -96,10 +94,10 @@ void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
     int sock = accept(master_sock, (struct sockaddr*)&addr, &addr_len);
-    if (evutil_make_socket_nonblocking(sock) < 0) {
+    if (evutil_make_socket_nonblocking(sock) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot make socket nonblocking");
     }
-    if (free_hybridbuf.empty()) {
+    if (free_hybridbuf.empty()) { [[unlikely]]
         WARNING("Max connection <%d> reached", MAX_CONNECTION);
         reply_with_503_unavailable(sock);
         LOG1("Connection closed: [%s]\n", get_host_and_port(addr).c_str());

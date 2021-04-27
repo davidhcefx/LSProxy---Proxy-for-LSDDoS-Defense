@@ -21,41 +21,44 @@
 #include <queue>
 #define MAX_CONNECTION    6  // 65536    // adjust it if needed // TODO: automatically setup
 #define MAX_HYBRIDBUF     MAX_CONNECTION
-#define MAX_FILE_DESC     6 * MAX_CONNECTION + 6  // see FILE DESCRIPTOR MAP
+#define MAX_FILE_DSC      6 * MAX_CONNECTION + 6  // see FILE_DESCRIPTOR_MAP
+#define SOCK_IO_BUF_SIZE  10 // 10 * 1024  // socket io buffer size (KB)
+#define HIST_CACHE_SIZE   8  // 8 * 1024  // in-mem cache for request history (KB)
+#define SOCK_CLOSE_WAITTIME  10 //30  // the timeout before leaving FIN-WAIT-2
+#define TRANSIT_TIMEOUT   4  // the timeout before transition finished
 // #define MAX_BODY_SIZE     ULONG_MAX  // 2^64 B
-#define SOCK_IO_BUF_SIZE  10  // 10 * 1024  // socket io buffer (KB)
-#define HIST_CACHE_SIZE   8 // 8 * 1024  // in-mem cache for request history (KB)
-#define SOCK_CLOSE_TIMEOUT 10 // 30
 #define LOG_LEVEL_1       // basic connection info
 #define LOG_LEVEL_2       // kind of noisy
 #define LOG_LEVEL_3       // very verbose
 #ifdef  LOG_LEVEL_1
-#define LOG1(...)         {printf(__VA_ARGS__);}
+#define LOG1(...)         { printf(__VA_ARGS__); }
 #else
 #define LOG1(...)         {}
 #endif  // LOG_LEVEL_1
 #ifdef  LOG_LEVEL_2
-#define LOG2(...)         {printf(__VA_ARGS__);}
+#define LOG2(...)         { printf(__VA_ARGS__); }
 #else
 #define LOG2(...)         {}
 #endif  // LOG_LEVEL_2
 #ifdef  LOG_LEVEL_3
-#define LOG3(...)         {printf(__VA_ARGS__);}
+#define LOG3(...)         { printf(__VA_ARGS__); }
 #else
 #define LOG3(...)         {}
 #endif  // LOG_LEVEL_3
-#define WARNING(fmt, ...) {fprintf(stderr, "[Warning] " fmt "\n" __VA_OPT__(,) \
-                                   __VA_ARGS__);}
-#define ERROR(fmt, ...)   {fprintf(stderr, "[Error] " fmt ": %s\n" __VA_OPT__(,) \
-                                   __VA_ARGS__, strerror(errno));}
-#define ERROR_EXIT(...)   {ERROR(__VA_ARGS__); exit(1);}
+#define WARNING(fmt, ...) \
+    { fprintf(stderr, "[Warning] " fmt "\n" __VA_OPT__(,) __VA_ARGS__); }
+#define ERROR(fmt, ...)   \
+    { fprintf(stderr, "[Error] " fmt ": %s (%s:%d)\n" __VA_OPT__(,) \
+              __VA_ARGS__, strerror(errno), __FILE__, __LINE__); }
+#define ERROR_EXIT(...)   { ERROR(__VA_ARGS__); exit(1); }
 using std::string;
 using std::to_string;
 using std::shared_ptr;
 using std::make_shared;
 using std::queue;
-using std::min;
 using std::exception;
+using std::min;
+using std::swap;
 
 /**
  * SPECIFICATION:
@@ -84,7 +87,7 @@ using std::exception;
  * [Timeout] To prevent legitimate connections from been recognized as suspicious,
  *     we set keep-alive timeout short and close client connection if timeout.
  *
- * FILE DESCRIPTOR MAP: (n=MAX_CONNECTION)
+ * FILE_DESCRIPTOR_MAP: (n=MAX_CONNECTION)
  *     0 ~ 3    stdin, stdout, stderr, master_sock
  *     4 ~ n+3  Hybridbuf for history (one per connection)
  *   n+4 ~ n+6  event_base use around 3
@@ -95,9 +98,9 @@ using std::exception;
  * [x] Event-based arch.
  * [x] Fast-mode
  * [x] History temp
- * [ ] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
+ * [?] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
  * [ ] Transfer rate monitor
- * [?] Transition logic
+ * [x] Transition logic
  * [-] Shorter keep-alive timeout
  * [x] Detect server down
  */
@@ -122,36 +125,41 @@ class Filebuf {
 
     Filebuf();
     virtual ~Filebuf() {close(fd);}
-    // upon disk failure, expect delays or data loss
-    // storing before clearing content will cause undefined behavior
+    // make sure content was cleared before storing; data might lost upon disk failure
     virtual void store(const char* data, size_t size) {_file_write(data, size);}
-    // print error message when failed
-    virtual ssize_t fetch(char* result, size_t max_size) {return _file_read(result, max_size);}
+    // error msg would be printed if failed
+    virtual ssize_t fetch(char* res, size_t max_size) {return _file_read(res, max_size);}
     // rewind content cursor (for further reads); 0 is to the beginning
-    virtual void rewind(size_t amount = 0) {_file_rewind();}
+    virtual void rewind(size_t amount = 0) {_file_rewind(amount);}
     // clear content and rewind
     void clear();
     int get_fd() {return fd;}
     // copy data from source to dest (overwrite dest)
-    static void copy_data(const Filebuf* source, Filebuf* dest);
+    static void copy_data(Filebuf* source, Filebuf* dest);
 
  protected:
-    /* File buffer */
     int fd;
     string file_name;
 
-    // retry 10 times with delays before failure
+    // retry 10 times before data loss
     void _file_write(const char* data, size_t size);
-    // print error message if failed
-    ssize_t _file_read(char* result, size_t max_size) {
-        auto count = read(fd, result, max_size);
-        if (count < 0) {
-            ERROR("Read failed '%s'", file_name.c_str());
-        }
-        return count;
+    virtual ssize_t _file_read(char* res, size_t max_size) {
+        return _read_and_log(fd, res, max_size);
     }
-    void _file_rewind() {
-        if (lseek(fd, 0, SEEK_SET) < 0) ERROR_EXIT("Cannot lseek");
+    // rewind backwards, amt=0 is to the beginning
+    virtual void _file_rewind(size_t amt) {
+        int whence = (amt == 0) ? SEEK_SET : SEEK_CUR;
+        if (lseek(fd, -amt, whence) < 0) { ERROR_EXIT("Cannot lseek"); }
+        LOG3("File #%d: Rewinded -%lu %s", fd, amt, (amt == 0) ? "(HEAD)" : "");
+    }
+    // error msg would be printed if failed
+    static ssize_t _read_and_log(int fd, char* result, size_t max_size) {
+        auto count = read(fd, result, max_size);
+        if (count < 0) { [[unlikely]]
+            ERROR("Read failed (#%d)", fd);
+        }
+        LOG2("File #%d: Read %lu bytes.\n", fd, count);
+        return count;
     }
 };
 
@@ -162,10 +170,9 @@ class Hybridbuf: public Filebuf {
     Hybridbuf(): next_pos{0} {};
     void store(const char* data, size_t size) override;
     ssize_t fetch(char* result, size_t max_size) override;
-    void rewind() override { _file_rewind(); _buf_rewind(); }
+    void rewind(size_t amount = 0) override;
 
  protected:
-    /* Memory buffer */
     char buffer[HIST_CACHE_SIZE];
     unsigned next_pos;  // next read/write position, range [0, HIST_CACHE_SIZE]
 
@@ -177,11 +184,49 @@ class Hybridbuf: public Filebuf {
     }
     size_t _buf_write(const char* data, size_t size);
     size_t _buf_read(char* result, size_t max_size);
-    void _buf_rewind() { next_pos = 0; }
+    // rewind backwards, amt=0 is to the beginning
+    void _buf_rewind(unsigned amt) {
+        next_pos -= (amt == 0) ? next_pos : amt;
+        LOG3("Mem-buffer: Rewinded -%u", (amt == 0) ? next_pos : amt);
+    }
 };
 
 
-/* Efficient in-memory circular buffer */
+/* class for file-based FIFO buffer */
+class FIFOfilebuf: public Filebuf {
+ public:
+    FIFOfilebuf() {
+        reader_fd = open(file_name.c_str(), O_RDONLY);  // second fd
+        if (reader_fd < 0) { [[unlikely]]
+            ERROR_EXIT("Cannot open '%s'", file_name.c_str());
+        }
+        LOG2("#%d = '%s' (reader)\n", reader_fd, file_name.c_str());
+    }
+    int get_reader_fd() { return reader_fd; }
+    /*
+     * void store(const char* data, size_t size);
+     * - Store to writer fd; make sure content was cleared before storing.
+     * - Data might be lost upon disk failure.
+     *
+     * ssize_t fetch(char* result, size_t max_size);
+     * - Fetch from reader fd; return 0 if there are no data available.
+     * - Error message would be printed if failed.
+     *
+     * void rewind(size_t amount = 0);
+     * - If amount == 0, rewind both reader & writer fd to the beginning.
+     * - Otherwise, only reader fd would be rewinded.
+     */
+ private:
+    int reader_fd;
+
+    ssize_t _file_read(char* result, size_t max_size) override {
+        return _read_and_log(reader_fd, result, max_size);
+    }
+    void _file_rewind(size_t amt) override;
+};
+
+
+/* efficient in-memory circular buffer */
 class Circularbuf {
  public:
     Circularbuf(): start_ptr{buffer}, end_ptr{buffer} {}
@@ -191,7 +236,7 @@ class Circularbuf {
     struct io_stat read_all_from(int fd);
     // write out as much as possible to fd; never set has_eof
     struct io_stat write_all_to(int fd);
-    struct io_stat write_all_to(Filebuf* filebuf);
+    void dump_to(Filebuf* filebuf);
     size_t data_size() {
         return (start_ptr <= end_ptr) ? \
             end_ptr - start_ptr : sizeof(buffer) - (start_ptr - end_ptr);
@@ -201,8 +246,8 @@ class Circularbuf {
 
  private:
     char buffer[SOCK_IO_BUF_SIZE];  // last byte don't store data
-    char* start_ptr;  // points to data start
-    char* end_ptr;    // points next to data end
+    char* start_ptr;                // points to data start
+    char* end_ptr;                  // points next to data end
 };
 
 
@@ -242,6 +287,9 @@ class HttpParser {
 extern char global_buffer[SOCK_IO_BUF_SIZE];
 extern queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 class Connection;
+void add_event(struct event* evt, const struct timeval* timeout = NULL);
+void del_event(struct event* evt);
+
 
 /* class for handling client io */
 class Client {
@@ -254,8 +302,8 @@ class Client {
     /* Slow-mode buffers */
     Filebuf* request_buf;        // buffer for a single request
     Filebuf* request_tmp_buf;    // temp buffer for overflow requests
-    Filebuf* response_buf;       // buffer for responses
-    // TODO: how to have two cursors?
+    // TODO: ^ maybe a FIFO would be better?
+    FIFOfilebuf* response_buf;   // buffer for responses
 
     // create the events and allocate Hybridbuf
     Client(int fd, const struct sockaddr_in& _addr, Connection* _conn);
@@ -264,19 +312,24 @@ class Client {
     int get_fd() { return event_get_fd(read_evt); }
     // upon a request completed, pause client and interact with server
     void recv_to_buffer_slowly(int fd);
+    // disable send event upon finished
+    void send_response_slowly(int fd);
     // disable further receiving and only reply msg
     void set_reply_only_mode() {
         // TODO(davidhcefx): use Filebuf or set timeout to prevent read attack
-        del_event(read_evt);
-        add_event(write_evt);
+        stop_recv();
+        start_send();
         LOG3("[%s] Client been set to reply-only mode.\n", addr.c_str());
     }
-    void pause_rw() { del_event(read_evt); del_event(write_evt); }
-    void resume_rw() { add_event(read_evt); add_event(write_evt); }
+    void pause_rw() { stop_recv(); stop_send(); LOG3("Client paused.\n"); }
+    void resume_rw() { start_recv(); start_send(); LOG3("Client resumed.\n"); }
     // keep track of incomplete requests; throw ParserError
     void keep_track_request_history(const char* data, size_t size);
     void copy_history_to(Filebuf* filebuf) {
         Filebuf::copy_data(request_history.get(), filebuf);
+    }
+    void free_queued_output() {
+        if (queued_output) { delete queued_output; queued_output = NULL; }
     }
     static void on_readable(int fd, short/*flag*/, void* arg);
     static void on_writable(int fd, short/*flag*/, void* arg);
@@ -284,6 +337,11 @@ class Client {
  private:
     shared_ptr<Hybridbuf> request_history;
     //// transfer_rate;
+
+    void stop_recv() { del_event(read_evt); }
+    void stop_send() { del_event(write_evt); }
+    void start_recv() { add_event(read_evt); }
+    void start_send() { add_event(write_evt); }
 };
 
 
@@ -303,10 +361,13 @@ class Server {
     // close socket and delete the events
     ~Server();
     int get_fd() {return event_get_fd(read_evt);}
-    // resume client when finished
+    // resume client upon finished
     void recv_to_buffer_slowly(int fd);
     // upon finished, move data back from client->request_tmp_buf
-    void forward_request_slowly(int fd);
+    void send_request_slowly(int fd);
+    void free_queued_output() {
+        if (queued_output) { delete queued_output; queued_output = NULL; }
+    }
     static void on_readable(int fd, short flag, void* arg);
     static void on_writable(int fd, short/*flag*/, void* arg);
 
@@ -330,7 +391,10 @@ class Connection {
     void set_slow_mode();
     // if transition to slow-mode still in progress
     bool is_in_transition() { return in_transition; }
-    bool set_transition_done() { in_transition = false; }
+    void set_transition_done() {
+        in_transition = false;
+        LOG2("[%s] Transition done.\n", client->addr.c_str());
+    }
     // forward client's msg to server; close server when client closed
     void fast_forward(Client*/*client*/, Server*/*server*/);
     // forward server's msg to client; put client to reply-only mode when server closed
@@ -361,12 +425,7 @@ inline string get_host_and_port(const struct sockaddr_in& addr) {
     return string(get_host(addr)) + ":" + to_string(get_port(addr));
 }
 
-inline int make_file_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
-// shutdown write; wait SOCK_CLOSE_TIMEOUT seconds (async) for FIN packet
+// shutdown write; wait SOCK_CLOSE_WAITTIME seconds (async) for FIN packet
 void close_socket_gracefully(int fd);
 // consume input; when timeout close fd and remove event
 void close_after_timeout(int fd, short flag, void* arg);
@@ -403,23 +462,16 @@ inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = N
     return event_new(evt_base, fd, EV_WRITE | EV_PERSIST, cb, arg);
 }
 
-inline void add_event(struct event* evt, const struct timeval* timeout = NULL) {
-    if (event_add(evt, timeout) < 0) {
+inline void add_event(struct event* evt, const struct timeval* timeout) {
+    if (event_add(evt, timeout) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot add event");
     }    
 }
 
 inline void del_event(struct event* evt) {
-    if (event_del(evt) < 0) {
+    if (event_del(evt) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot del event");
     }
-}
-
-// can be used to update timeout
-inline void del_and_reAdd_event(struct event* evt, unsigned timeout_sec) {
-    struct timeval t = {.tv_sec = timeout_sec, .tv_usec = 0};
-    del_event(evt);
-    add_event(evt, &t);
 }
 
 inline void free_event(struct event* evt) { event_free(evt); }
