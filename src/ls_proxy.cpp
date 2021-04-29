@@ -8,8 +8,61 @@ queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 char* Server::address;
 unsigned short Server::port;
 unsigned Server::connection_count = 0;
-llhttp_settings_t HttpParser::settings;
+llhttp_settings_t HttpParser::request_settings;
+llhttp_settings_t HttpParser::response_settings;
 
+
+// TODO: add [[unlikely]] to where?
+// void HeaderWatchdog::watch_this(const char* data, size_t size, bool is_field) {
+//     if (has_seen_target) return;
+//     if (is_field) {
+//         if (!last_call_is_field) {
+            /* New field begins */
+            // check last one
+        //     if (has_found_target()) {
+        //         has_seen_target = true;
+        //         return;
+        //     }
+        //     // store current one
+        //     if (data[0] != 'C') {
+        //         skip_this_line = true;  // skip until next field
+        //     } else {
+        //         skip_this_line = false;
+        //         field_idx = 0;          // rewind
+        //         _store_field(data, size);
+        //     }
+        // } else if (!skip_this_line) {
+            /* Continue previous field */
+    //         _store_field(data, size);
+    //     }
+    // } else if (!skip_this_line) {
+        /* Called from "on_value" callback */
+        // if (last_call_is_field) {
+            /* New value begins */
+        //     value_idx = 0;             // rewind
+        //     _store_value(data, size);
+        // } else {
+            /* Continue previous value */
+//             _store_value(data, size);
+//         }
+//     }
+//     last_call_is_field = is_field;
+//     LOG3("Watchdog: Watched %lu bytes.\n", size);
+// }
+
+// bool HeaderWatchdog::has_found_target() {
+//     const char* target_field = "Connection";
+//     const char* target_value = "close";
+//     if (has_seen_target || ( \
+//             memcmp(field_buf, target_field, strlen(target_field)) == 0 && \
+//             memcmp(value_buf, target_value, strlen(target_value)) == 0 \
+//             )) {
+//         LOG3("Watchdog: Wof Wof! Found target '%s:%s'!\n", target_field, \
+//              target_value);
+//         return true;
+//     }
+//     return false;
+// }
 
 void HttpParser::do_parse(const char* data, size_t size) {
     first_eom = last_eom = NULL;  // reset end-of-msg pointers
@@ -21,38 +74,21 @@ void HttpParser::do_parse(const char* data, size_t size) {
     }
 }
 
-void close_socket_gracefully(int fd) {
-    if (shutdown(fd, SHUT_WR) < 0) ERROR_EXIT("Shutdown error");
-    while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {
-        /* consume input */
-    }
-    if (read(fd, global_buffer, 1) == 0) {  // FIN arrived
-        close(fd);
-    } else {
-        struct timeval timeout = {.tv_sec = SOCK_CLOSE_WAITTIME, .tv_usec = 0};
-        auto evt = new_read_event(fd, close_after_timeout, event_self_cbarg());
-        add_event(evt, &timeout);
-    }
-}
-
-void close_after_timeout(int fd, short flag, void* arg) {
-    auto evt = (struct event*)arg;
-    if (flag & EV_TIMEOUT) {
-        del_event(evt);
-        close(fd);
-        LOG3("#%d timed out and were closed.\n", fd);
-    } else {
-        char buf[0x20];
-        while (read(fd, buf, sizeof(buf)) > 0) {}  // consume input
-    }
+void HttpParser::init_all_settings() {
+    // request
+    llhttp_settings_init(&request_settings);
+    request_settings.on_message_complete = message_complete_cb;
+    // response
+    llhttp_settings_init(&response_settings);
+    response_settings.on_headers_complete = headers_complete_cb;
+    response_settings.on_message_complete = message_complete_cb;
 }
 
 struct io_stat read_all(int fd, char* buffer, size_t max_size) {
     struct io_stat stat;
     auto remain = max_size;
     while (remain > 0) {
-        auto count = read(fd, buffer, remain);
-        if (count > 0) {
+        if (auto count = read(fd, buffer, remain); count > 0) {
             buffer += count;  // move ptr
             remain -= count;
         } else {
@@ -71,8 +107,7 @@ struct io_stat write_all(int fd, const char* data, size_t size) {
     struct io_stat stat;
     auto remain = size;
     while (remain > 0) {
-        auto count = write(fd, data, remain);
-        if (count > 0) {
+        if (auto count = write(fd, data, remain); count > 0) {
             data += count;  // move ptr
             remain -= count;
         } else {
@@ -84,9 +119,34 @@ struct io_stat write_all(int fd, const char* data, size_t size) {
     return stat;
 }
 
+void close_socket_gracefully(int fd) {
+    if (shutdown(fd, SHUT_WR) < 0) ERROR_EXIT("Shutdown error");
+    while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {
+        /* consume input */
+    }
+    if (read(fd, global_buffer, 1) == 0) {  // FIN arrived
+        close(fd);
+    } else {
+        struct timeval timeout = {.tv_sec = SOCK_CLOSE_WAITTIME, .tv_usec = 0};
+        auto evt = new_read_event(fd, close_after_timeout, event_self_cbarg());
+        add_event(evt, &timeout);
+    }
+}
+
+void close_after_timeout(int fd, short flag, void* arg) {
+    auto evt = reinterpret_cast<struct event*>(arg);
+    if (flag & EV_TIMEOUT) {
+        del_event(evt);
+        close(fd);
+        LOG3("#%d timed out and were closed.\n", fd);
+    } else {
+        char buf[0x20];
+        while (read(fd, buf, sizeof(buf)) > 0) {}  // consume input
+    }
+}
+
 void raise_open_file_limit(size_t value) {
     struct rlimit lim;
-
     if (getrlimit(RLIMIT_NOFILE, &lim) < 0) {
         ERROR_EXIT("Cannot getrlimit");
     }
@@ -174,12 +234,15 @@ void put_all_connection_slow_mode(int/*sig*/) {
 int put_slow_mode(const struct event_base*, const struct event* evt, void*) {
     auto cb = event_get_callback(evt);
     auto arg = event_get_callback_arg(evt);
+    auto check_and_set_slow_mode = [](auto conn) {
+        if (!conn->is_in_transition()) conn->set_slow_mode();
+    };
 
     if (cb == Client::on_readable || cb == Client::on_writable) {
-        ((Client*)arg)->conn->set_slow_mode();
+        check_and_set_slow_mode((reinterpret_cast<Client*>(arg))->conn);
     } else if (cb == Server::on_readable || cb == Server::on_writable) {
-        ((Server*)arg)->conn->set_slow_mode();
-    }  // else can also be other things
+        check_and_set_slow_mode((reinterpret_cast<Server*>(arg))->conn);
+    }
     return 0;
 }
 
@@ -187,13 +250,23 @@ int close_event_fd(const struct event_base*, const struct event* evt, void*) {
     return close(event_get_fd(evt));
 }
 
+int headers_complete_cb(llhttp_t* parser) {
+    auto h_parser = reinterpret_cast<HttpParser*>(parser->data);
+    // HEAD or 304 not modified MUST NOT has body
+    if (parser->status_code == 304 || h_parser->last_method == HTTP_HEAD) {
+        return 1;
+    }
+    return 0;
+}
+
 int message_complete_cb(llhttp_t* parser, const char* at, size_t/*len*/) {
-    auto h_parser = (HttpParser*)parser->data;
+    auto h_parser = reinterpret_cast<HttpParser*>(parser->data);
     // keep track of *at, which points next to the end of message
     if (h_parser->first_end_of_msg_not_set()) {
         h_parser->set_first_end_of_msg(at);
     }
     h_parser->set_last_end_of_msg(at);
+    h_parser->last_method = parser->method;  // update
     return 0;
 }
 
@@ -213,14 +286,12 @@ int main(int argc, char* argv[]) {
     raise_open_file_limit(MAX_FILE_DSC);
     int master_sock = passive_TCP(port);  // fd should be 3
     for (int i = 0; i < MAX_HYBRIDBUF; i++) {
-        free_hybridbuf.push(make_shared<Hybridbuf>());
+        free_hybridbuf.push(make_shared<Hybridbuf>("hist"));
     }
     assert(free_hybridbuf.back()->get_fd() == 3 + MAX_HYBRIDBUF);
 
-    // setup parser
-    llhttp_settings_init(&HttpParser::settings);
-    HttpParser::settings.on_message_complete = message_complete_cb;
-    // setup signal handlers
+    // setup parser and signal handlers
+    HttpParser::init_all_settings();
     if (signal(SIGINT, break_event_loop) == SIG_ERR) {
         ERROR_EXIT("Cannot set SIGINT handler");
     }

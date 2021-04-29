@@ -1,6 +1,5 @@
 #ifndef SRC_LS_PROXY_H_
 #define SRC_LS_PROXY_H_
-#include "llhttp/llhttp.h"
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
@@ -19,12 +18,14 @@
 #include <string>
 #include <memory>
 #include <queue>
+#include <algorithm>
+#include "llhttp/llhttp.h"
 #define MAX_CONNECTION    6  // 65536    // adjust it if needed // TODO: automatically setup
 #define MAX_HYBRIDBUF     MAX_CONNECTION
 #define MAX_FILE_DSC      6 * MAX_CONNECTION + 6  // see FILE_DESCRIPTOR_MAP
-#define SOCK_IO_BUF_SIZE  10 // 10 * 1024  // socket io buffer size (KB)
+#define SOCK_IO_BUF_SIZE  10  // 10 * 1024  // socket io buffer size (KB)
 #define HIST_CACHE_SIZE   8  // 8 * 1024  // in-mem cache for request history (KB)
-#define SOCK_CLOSE_WAITTIME  10 //30  // the timeout before leaving FIN-WAIT-2
+#define SOCK_CLOSE_WAITTIME  10  // 30  // the timeout before leaving FIN-WAIT-2
 #define TRANSIT_TIMEOUT   4  // the timeout before transition finished
 // #define MAX_BODY_SIZE     ULONG_MAX  // 2^64 B
 #define LOG_LEVEL_1       // basic connection info
@@ -123,7 +124,7 @@ class Filebuf {
  public:
     size_t data_size;
 
-    Filebuf();
+    explicit Filebuf(const char* alias = "");
     virtual ~Filebuf() {close(fd);}
     // make sure content was cleared before storing; data might lost upon disk failure
     virtual void store(const char* data, size_t size) {_file_write(data, size);}
@@ -150,7 +151,7 @@ class Filebuf {
     virtual void _file_rewind(size_t amt) {
         int whence = (amt == 0) ? SEEK_SET : SEEK_CUR;
         if (lseek(fd, -amt, whence) < 0) { ERROR_EXIT("Cannot lseek"); }
-        LOG3("File #%d: Rewinded -%lu %s", fd, amt, (amt == 0) ? "(HEAD)" : "");
+        LOG3("File #%d: Rewinded -%lu %s\n", fd, amt, (amt == 0) ? "(HEAD)" : "");
     }
     // error msg would be printed if failed
     static ssize_t _read_and_log(int fd, char* result, size_t max_size) {
@@ -167,7 +168,7 @@ class Filebuf {
 /* class for using both memory and file as buffer */
 class Hybridbuf: public Filebuf {
  public:
-    Hybridbuf(): next_pos{0} {};
+    explicit Hybridbuf(const char* alias = ""): Filebuf{alias}, next_pos{0} {};
     void store(const char* data, size_t size) override;
     ssize_t fetch(char* result, size_t max_size) override;
     void rewind(size_t amount = 0) override;
@@ -186,8 +187,8 @@ class Hybridbuf: public Filebuf {
     size_t _buf_read(char* result, size_t max_size);
     // rewind backwards, amt=0 is to the beginning
     void _buf_rewind(unsigned amt) {
+        LOG3("Mem-buf #%d: Rewinded -%u\n", fd, (amt == 0) ? next_pos : amt);
         next_pos -= (amt == 0) ? next_pos : amt;
-        LOG3("Mem-buffer: Rewinded -%u", (amt == 0) ? next_pos : amt);
     }
 };
 
@@ -195,7 +196,7 @@ class Hybridbuf: public Filebuf {
 /* class for file-based FIFO buffer */
 class FIFOfilebuf: public Filebuf {
  public:
-    FIFOfilebuf() {
+    explicit FIFOfilebuf(const char* alias = ""): Filebuf{alias} {
         reader_fd = open(file_name.c_str(), O_RDONLY);  // second fd
         if (reader_fd < 0) { [[unlikely]]
             ERROR_EXIT("Cannot open '%s'", file_name.c_str());
@@ -251,35 +252,76 @@ class Circularbuf {
 };
 
 
+/* class for watching out "Connection:close" http header */
+// class HeaderWatchdog {
+//  public:
+//     HeaderWatchdog(): field_idx{0}, value_idx{0}, has_seen_target{false}
+//                       last_call_is_field{false}, skip_this_line{false} {}
+//     void watch_this(const char* data, size_t size, bool is_field);
+//     // scan buffer and return true if found target
+//     bool has_found_target();
+//     // call it before moving on to the next response
+//     void reset() {
+//         field_idx = value_idx = 0;
+//         has_seen_target = last_call_is_field = false;
+//         LOG3("Watchdog: Reset.\n");
+//     }
+
+//  private:
+//     char field_buf[10];   // for "Connection"
+//     char value_buf[5];    // for "close"
+//     int8_t field_idx;     // next write position
+//     int8_t value_idx;     // next write position
+//     bool has_seen_target;
+//     bool last_call_is_field;  // last call is from on_field callback
+//     bool skip_this_line;
+
+//     // will check remaining space and increase field_idx
+//     void _store_field(const char* data, size_t size) {
+//         size = min(size, sizeof(field_buf) - field_idx);  // restrict by space
+//         memcpy(field_buf + field_idx, data, size);
+//         field_idx += size;
+//     }
+//     void _store_value(const char* data, size_t size) {
+//         size = min(size, sizeof(value_buf) - value_idx);  // restrict by space
+//         memcpy(value_buf + value_idx, data, size);
+//         value_idx += size;
+//     }
+// };
+
+
 /* Http request/response parser */
 class HttpParser {
  public:
-    static llhttp_settings_t settings;  // callback settings
+    static llhttp_settings_t request_settings;  // callback settings
+    static llhttp_settings_t response_settings;
+    int8_t last_method;  // last request method
 
-    HttpParser(): parser{new llhttp_t}, first_eom{NULL}, last_eom{NULL} {
-        reset_parser();
-    }
+    HttpParser():
+        last_method{0}, parser{new llhttp_t}, first_eom{NULL}, last_eom{NULL}
+    { reset_parser(request_settings); }
     ~HttpParser() { delete parser; }
     // call these only if you are switching between different modes
-    void switch_to_request_mode() { reset_parser(); }
-    void switch_to_response_mode() { reset_parser(); }
+    void switch_to_request_mode() { reset_parser(request_settings); }
+    void switch_to_response_mode() { reset_parser(response_settings); }
     // invoke callbacks along the way; throw ParserError
     void do_parse(const char* data, size_t size);
     bool first_end_of_msg_not_set() { return first_eom == NULL; }
     void set_first_end_of_msg(const char* p) { first_eom = p; }
-    void set_last_end_of_msg(const char* p) { last_eom = p; };
+    void set_last_end_of_msg(const char* p) { last_eom = p; }
     // get nullable pointer to first-encountered end-of-msg (past end)
     const char* get_first_end_of_msg() { return first_eom; }
     const char* get_last_end_of_msg() { return last_eom; }
+    static void init_all_settings();
 
  private:
-    llhttp_t* parser;
+    llhttp_t* parser;       // (size: ~96 B)
     const char* first_eom;  // first end-of-msg encountered in last run
     const char* last_eom;   // last end-of-msg encountered in last run
 
-    void reset_parser() {
+    void reset_parser(const llhttp_settings_t& settings) {
         llhttp_init(parser, HTTP_BOTH, &settings);
-        parser->data = (void*)this;
+        parser->data = reinterpret_cast<void*>(this);
     }
 };
 
@@ -310,6 +352,7 @@ class Client {
     // close socket, delete the events and release Hybridbuf
     ~Client();
     int get_fd() { return event_get_fd(read_evt); }
+    const char* c_addr() { return addr.c_str(); }
     // upon a request completed, pause client and interact with server
     void recv_to_buffer_slowly(int fd);
     // disable send event upon finished
@@ -319,7 +362,7 @@ class Client {
         // TODO(davidhcefx): use Filebuf or set timeout to prevent read attack
         stop_recv();
         start_send();
-        LOG3("[%s] Client been set to reply-only mode.\n", addr.c_str());
+        LOG3("[%s] Client been set to reply-only mode.\n", c_addr());
     }
     void pause_rw() { stop_recv(); stop_send(); LOG3("Client paused.\n"); }
     void resume_rw() { start_recv(); start_send(); LOG3("Client resumed.\n"); }
@@ -360,7 +403,7 @@ class Server {
     explicit Server(Connection* _conn);
     // close socket and delete the events
     ~Server();
-    int get_fd() {return event_get_fd(read_evt);}
+    int get_fd() { return event_get_fd(read_evt); }
     // resume client upon finished
     void recv_to_buffer_slowly(int fd);
     // upon finished, move data back from client->request_tmp_buf
@@ -393,7 +436,7 @@ class Connection {
     bool is_in_transition() { return in_transition; }
     void set_transition_done() {
         in_transition = false;
-        LOG2("[%s] Transition done.\n", client->addr.c_str());
+        LOG2("[%s] Transition done.\n", client->c_addr());
     }
     // forward client's msg to server; close server when client closed
     void fast_forward(Client*/*client*/, Server*/*server*/);
@@ -425,14 +468,14 @@ inline string get_host_and_port(const struct sockaddr_in& addr) {
     return string(get_host(addr)) + ":" + to_string(get_port(addr));
 }
 
-// shutdown write; wait SOCK_CLOSE_WAITTIME seconds (async) for FIN packet
-void close_socket_gracefully(int fd);
-// consume input; when timeout close fd and remove event
-void close_after_timeout(int fd, short flag, void* arg);
 // read as much as possible
 struct io_stat read_all(int fd, char* buffer, size_t max_size);
 // write as much as possible
 struct io_stat write_all(int fd, const char* data, size_t size);
+// shutdown write; wait SOCK_CLOSE_WAITTIME seconds (async) for FIN packet
+void close_socket_gracefully(int fd);
+// consume input; when timeout close fd and remove event
+void close_after_timeout(int fd, short flag, void* arg);
 // raise system-wide RLIMIT_NOFILE
 void raise_open_file_limit(size_t value);
 // reply with contents of 'res/503.html' and return num of bytes written
@@ -449,7 +492,9 @@ void put_all_connection_slow_mode(int/*sig*/);
 int put_slow_mode(const struct event_base*, const struct event*, void*);
 // event_base callback
 int close_event_fd(const struct event_base*, const struct event*, void*);
-// parser callback
+
+/* Parser callbacks */
+int headers_complete_cb(llhttp_t* parser);
 int message_complete_cb(llhttp_t* parser, const char* at, size_t length);
 
 /* Event wrappers */
@@ -465,7 +510,7 @@ inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = N
 inline void add_event(struct event* evt, const struct timeval* timeout) {
     if (event_add(evt, timeout) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot add event");
-    }    
+    }
 }
 
 inline void del_event(struct event* evt) {

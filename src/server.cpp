@@ -10,14 +10,14 @@ Server::Server(Connection* _conn): conn{_conn}, queued_output{NULL} {
     if (evutil_make_socket_nonblocking(sock) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot make socket nonblocking");
     }
-    LOG2("Connected to [SERVER] (#%d) (active: %d)\n", sock,
+    LOG2("[SERVER] Connection opened (#%d) (active: %d)\n", sock,
          ++Server::connection_count);
     read_evt = new_read_event(sock, Server::on_readable, this);
     write_evt = new_write_event(sock, Server::on_writable, this);
 }
 
 Server::~Server() {
-    LOG2("Connection closed: [SERVER] (active: %u)\n", --Server::connection_count);
+    LOG2("[SERVER] Connection closed (active: %u)\n", --Server::connection_count);
     close_socket_gracefully(get_fd());
     del_event(read_evt);
     del_event(write_evt);
@@ -30,7 +30,8 @@ void Server::recv_to_buffer_slowly(int fd) {
     auto client = conn->client;
     auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
     client->response_buf->store(global_buffer, stat.nbytes);
-    LOG2("[%s] response <<<< %-6lu [SERVER]\n", client->addr.c_str(), stat.nbytes);
+    LOG2("[%s] %9s response <<<< %-6lu [SERVER]\n", client->c_addr(), "", \
+         stat.nbytes);
     try {
         conn->parser->do_parse(global_buffer, stat.nbytes);
     } catch (ParserError& err) {
@@ -47,28 +48,24 @@ void Server::recv_to_buffer_slowly(int fd) {
     }
     auto end_ptr = conn->parser->get_last_end_of_msg();
     if (stat.has_eof || end_ptr) {  // server closed or msg finished
+        LOG2("[%s] Response completed.\n", client->c_addr());
         // resume client
         conn->free_server();
         conn->parser->switch_to_request_mode();
         client->resume_rw();
     }
-
-    /* TODO: how about these?
-     *  HEAD method can has content-length, but no body
-     *  304 Not Modified can has transfer-encoding, but no body
-     */
 }
 
 void Server::send_request_slowly(int fd) {
     auto client = conn->client;
     auto count = client->request_buf->fetch(global_buffer, sizeof(global_buffer));
     if (count > 0) {
-        auto stat = write_all(fd, global_buffer, count);
-        if (stat.nbytes < (size_t)count) {
-            client->request_buf->rewind(count - stat.nbytes);
+        auto nbytes = write_all(fd, global_buffer, count).nbytes;
+        if (nbytes < (size_t)count) {
+            client->request_buf->rewind(count - nbytes);
         }
-        LOG2("[%s] request >>>> %-6lu [SERVER]\n", client->addr.c_str(), \
-             count - stat.nbytes);
+        LOG2("[%s] %9s request >>>> %-6lu [SERVER]\n", client->c_addr(), "", \
+             nbytes);
     } else if (count == 0) {  // done forwarding
         del_event(write_evt);
         // move data back from request_tmp_buf
@@ -79,7 +76,7 @@ void Server::send_request_slowly(int fd) {
 }
 
 void Server::on_readable(int fd, short flag, void* arg) {
-    auto server = (Server*)arg;
+    auto server = reinterpret_cast<Server*>(arg);
     auto conn = server->conn;
     auto client = conn->client;
     if (conn->is_fast_mode()) {
@@ -100,8 +97,8 @@ void Server::on_readable(int fd, short flag, void* arg) {
                 return;
             }
             client->response_buf->store(global_buffer, stat.nbytes);
-            LOG2("[%s] response <<<< %-6lu [SERVER]\n", client->addr.c_str(), \
-                 stat.nbytes);
+            LOG2("[%s] %9s response <<<< %-6lu [SERVER]\n", client->c_addr(), \
+                 "", stat.nbytes);
         }
     } else {
         server->recv_to_buffer_slowly(fd);
@@ -109,7 +106,7 @@ void Server::on_readable(int fd, short flag, void* arg) {
 }
 
 void Server::on_writable(int fd, short/*flag*/, void* arg) {
-    auto server = (Server*)arg;
+    auto server = reinterpret_cast<Server*>(arg);
     auto conn = server->conn;
     auto client = conn->client;
     if (conn->is_fast_mode()) {
@@ -117,18 +114,18 @@ void Server::on_writable(int fd, short/*flag*/, void* arg) {
         add_event(client->read_evt);
         del_event(server->write_evt);
         // write some
-        auto stat = server->queued_output->write_all_to(fd);
-        LOG2("[%s] queue(%lu) >>>> %-6lu [SERVER]\n", client->addr.c_str(),
-             server->queued_output->data_size(), stat.nbytes);
+        auto nbytes = server->queued_output->write_all_to(fd).nbytes;
+        LOG2("[%s] %9s queue(%lu) >>>> %-6lu [SERVER]\n", client->c_addr(),
+             "", server->queued_output->data_size(), nbytes);
     } else if (conn->is_in_transition()) {
         // simply feed queue to server
-        auto stat = server->queued_output->write_all_to(fd);
+        auto nbytes = server->queued_output->write_all_to(fd).nbytes;
         if (server->queued_output->data_size() == 0) {  // done
             del_event(server->write_evt);
             server->free_queued_output();
         }
-        LOG2("[%s] queue(%lu) >>>> %-6lu [SERVER]\n", client->addr.c_str(),
-             server->queued_output->data_size(), stat.nbytes);
+        LOG2("[%s] %9s queue(%lu) >>>> %-6lu [SERVER]\n", client->c_addr(),
+             "", server->queued_output->data_size(), nbytes);
     } else {
         server->send_request_slowly(fd);
     }

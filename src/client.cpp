@@ -9,10 +9,11 @@ Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
     write_evt = new_write_event(fd, Client::on_writable, this);
     request_history = free_hybridbuf.front();
     free_hybridbuf.pop();
+    LOG2("[%s] Allocated hist buf (#%d)\n", c_addr(), request_history->get_fd());
 }
 
 Client::~Client() {
-    LOG1("Connection closed: [%s]\n", addr.c_str());
+    LOG1("[%s]: Connection closed.\n", c_addr());
     close_socket_gracefully(get_fd());
     del_event(read_evt);
     del_event(write_evt);
@@ -26,9 +27,9 @@ Client::~Client() {
 }
 
 void Client::recv_to_buffer_slowly(int fd) {
-    auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
+    auto nbytes = read_all(fd, global_buffer, sizeof(global_buffer)).nbytes;
     try {
-        conn->parser->do_parse(global_buffer, stat.nbytes);
+        conn->parser->do_parse(global_buffer, nbytes);
     } catch (ParserError& err) {
         // close connection
         assert(!conn->server);  // server only exists when client paused
@@ -40,12 +41,14 @@ void Client::recv_to_buffer_slowly(int fd) {
         }
         return;
     }
-    auto end_ptr = conn->parser->get_first_end_of_msg();
-    if (end_ptr) {  // at least one completed
+    if (auto end_ptr = conn->parser->get_first_end_of_msg()) {
+        LOG2("[%s] Request completed.\n", c_addr());
         // store first msg to request_buf, the remaining to request_tmp_buf
-        size_t size = end_ptr - global_buffer;
-        request_buf->store(global_buffer, size);
-        request_tmp_buf->store(end_ptr, stat.nbytes - size);
+        size_t first_size = end_ptr - global_buffer;
+        request_buf->store(global_buffer, first_size);
+        if (nbytes - first_size > 0) {
+            request_tmp_buf->store(end_ptr, nbytes - first_size);
+        }
         // pause client, rewind buffers and interact with server
         pause_rw();
         request_buf->rewind();  // for further reads
@@ -54,20 +57,19 @@ void Client::recv_to_buffer_slowly(int fd) {
         add_event(conn->server->write_evt);
         add_event(conn->server->read_evt);
     } else {
-        request_buf->store(global_buffer, stat.nbytes);
-        LOG2("[%s] %6lu >>>> request\n", addr.c_str(), stat.nbytes);
+        request_buf->store(global_buffer, nbytes);
+        LOG2("[%s] %6lu >>>> request\n", c_addr(), nbytes);
     }
 }
 
 void Client::send_response_slowly(int fd) {
     auto count = response_buf->fetch(global_buffer, sizeof(global_buffer));
     if (count > 0) {
-        auto stat = write_all(fd, global_buffer, count);
-        if (stat.nbytes < (size_t)count) {
-            response_buf->rewind(count - stat.nbytes);
+        auto nbytes = write_all(fd, global_buffer, count).nbytes;
+        if (nbytes < (size_t)count) {
+            response_buf->rewind(count - nbytes);
         }
-        LOG2("[%s] %6lu <<<< response\n", addr.c_str(), \
-             count - stat.nbytes);
+        LOG2("[%s] %6lu <<<< response\n", c_addr(), nbytes);
     } else if (count == 0) {  // no data to forward
         del_event(write_evt);
     }
@@ -76,8 +78,7 @@ void Client::send_response_slowly(int fd) {
 void Client::keep_track_request_history(const char* data, size_t size) {
     // ignore previous complete-requests (if any)
     conn->parser->do_parse(data, size);
-    auto end_ptr = conn->parser->get_last_end_of_msg();
-    if (end_ptr) {
+    if (auto end_ptr = conn->parser->get_last_end_of_msg()) {
         // start storing from here
         request_history->clear();
         request_history->store(end_ptr, size - (end_ptr - data));
@@ -89,10 +90,10 @@ void Client::keep_track_request_history(const char* data, size_t size) {
 }
 
 void Client::on_readable(int fd, short/*flag*/, void* arg) {
-    auto client = (Client*)arg;
+    auto client = reinterpret_cast<Client*>(arg);
     auto conn = client->conn;
     if (conn->is_fast_mode()) {
-        if (!conn->parser) {  // uninitialized
+        if (!conn->parser) { [[unlikely]]  // parser & server not created
             conn->parser = new HttpParser();
             try {
                 conn->server = new Server(conn);
@@ -113,10 +114,10 @@ void Client::on_readable(int fd, short/*flag*/, void* arg) {
 }
 
 void Client::on_writable(int fd, short/*flag*/, void* arg) {
-    auto client = (Client*)arg;
+    auto client = reinterpret_cast<Client*>(arg);
     auto conn = client->conn;
     if (conn->is_fast_mode()) {
-        if (!conn->server) {  // server already closed (reply-only mode)
+        if (!conn->server) { [[unlikely]]  // server closed (reply-only mode)
             client->queued_output->write_all_to(fd);
             if (client->queued_output->data_size() == 0) {
                 delete conn;
@@ -126,9 +127,9 @@ void Client::on_writable(int fd, short/*flag*/, void* arg) {
             add_event(conn->server->read_evt);
             del_event(client->write_evt);
             // write some
-            auto stat = client->queued_output->write_all_to(fd);
-            LOG2("[%s] %6lu <<<< queue(%lu)\n", client->addr.c_str(),
-                 stat.nbytes, client->queued_output->data_size());
+            auto nbytes = client->queued_output->write_all_to(fd).nbytes;
+            LOG2("[%s] %6lu <<<< queue(%lu)\n", client->c_addr(),
+                 nbytes, client->queued_output->data_size());
         }
     } else {
         /* Slow mode */
