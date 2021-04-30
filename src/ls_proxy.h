@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -99,7 +100,7 @@ using std::swap;
  * [x] Event-based arch.
  * [x] Fast-mode
  * [x] History temp
- * [?] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
+ * [x] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
  * [ ] Transfer rate monitor
  * [x] Transition logic
  * [-] Shorter keep-alive timeout
@@ -252,44 +253,6 @@ class Circularbuf {
 };
 
 
-/* class for watching out "Connection:close" http header */
-// class HeaderWatchdog {
-//  public:
-//     HeaderWatchdog(): field_idx{0}, value_idx{0}, has_seen_target{false}
-//                       last_call_is_field{false}, skip_this_line{false} {}
-//     void watch_this(const char* data, size_t size, bool is_field);
-//     // scan buffer and return true if found target
-//     bool has_found_target();
-//     // call it before moving on to the next response
-//     void reset() {
-//         field_idx = value_idx = 0;
-//         has_seen_target = last_call_is_field = false;
-//         LOG3("Watchdog: Reset.\n");
-//     }
-
-//  private:
-//     char field_buf[10];   // for "Connection"
-//     char value_buf[5];    // for "close"
-//     int8_t field_idx;     // next write position
-//     int8_t value_idx;     // next write position
-//     bool has_seen_target;
-//     bool last_call_is_field;  // last call is from on_field callback
-//     bool skip_this_line;
-
-//     // will check remaining space and increase field_idx
-//     void _store_field(const char* data, size_t size) {
-//         size = min(size, sizeof(field_buf) - field_idx);  // restrict by space
-//         memcpy(field_buf + field_idx, data, size);
-//         field_idx += size;
-//     }
-//     void _store_value(const char* data, size_t size) {
-//         size = min(size, sizeof(value_buf) - value_idx);  // restrict by space
-//         memcpy(value_buf + value_idx, data, size);
-//         value_idx += size;
-//     }
-// };
-
-
 /* Http request/response parser */
 class HttpParser {
  public:
@@ -344,7 +307,6 @@ class Client {
     /* Slow-mode buffers */
     Filebuf* request_buf;        // buffer for a single request
     Filebuf* request_tmp_buf;    // temp buffer for overflow requests
-    // TODO: ^ maybe a FIFO would be better?
     FIFOfilebuf* response_buf;   // buffer for responses
 
     // create the events and allocate Hybridbuf
@@ -413,9 +375,6 @@ class Server {
     }
     static void on_readable(int fd, short flag, void* arg);
     static void on_writable(int fd, short/*flag*/, void* arg);
-
- private:
-    // unsigned long int content_len;  // TODO: Transfer-Encoding ??
 };
 
 
@@ -468,18 +427,25 @@ inline string get_host_and_port(const struct sockaddr_in& addr) {
     return string(get_host(addr)) + ":" + to_string(get_port(addr));
 }
 
+// raise system-wide RLIMIT_NOFILE
+void raise_open_file_limit(size_t value);
 // read as much as possible
 struct io_stat read_all(int fd, char* buffer, size_t max_size);
 // write as much as possible
 struct io_stat write_all(int fd, const char* data, size_t size);
+// reply with contents of 'res/503.html' and return num of bytes written
+size_t reply_with_503_unavailable(int sock);
+
+inline ssize_t get_file_size(int fd) {
+    struct stat info;
+    if (fstat(fd, &info) < 0) [[unlikely]] ERROR_EXIT("Cannot fstat");
+    return info.st_size;
+}
+
 // shutdown write; wait SOCK_CLOSE_WAITTIME seconds (async) for FIN packet
 void close_socket_gracefully(int fd);
 // consume input; when timeout close fd and remove event
 void close_after_timeout(int fd, short flag, void* arg);
-// raise system-wide RLIMIT_NOFILE
-void raise_open_file_limit(size_t value);
-// reply with contents of 'res/503.html' and return num of bytes written
-size_t reply_with_503_unavailable(int sock);
 // return master socket Fd
 int passive_TCP(unsigned short port, int qlen = 128);
 // return socket Fd; host can be either hostname or IP address
@@ -521,5 +487,19 @@ inline void del_event(struct event* evt) {
 
 inline void free_event(struct event* evt) { event_free(evt); }
 
+/* struct for packing two args into one */
+struct timer_arg {
+    struct event* evt;
+    union {
+        int fd;
+    };
+    explicit timer_arg(int _fd) { fd = _fd; }
+    ~timer_arg() { del_event(evt); free_event(evt); }
+};
+
+inline struct event* new_timer(event_callback_fn cb, int fd) {
+    struct timer_arg* arg = new struct timer_arg(fd);
+    return (arg->evt = evtimer_new(evt_base, cb, arg));
+}
 
 #endif  // SRC_LS_PROXY_H_

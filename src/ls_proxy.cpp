@@ -12,58 +12,6 @@ llhttp_settings_t HttpParser::request_settings;
 llhttp_settings_t HttpParser::response_settings;
 
 
-// TODO: add [[unlikely]] to where?
-// void HeaderWatchdog::watch_this(const char* data, size_t size, bool is_field) {
-//     if (has_seen_target) return;
-//     if (is_field) {
-//         if (!last_call_is_field) {
-            /* New field begins */
-            // check last one
-        //     if (has_found_target()) {
-        //         has_seen_target = true;
-        //         return;
-        //     }
-        //     // store current one
-        //     if (data[0] != 'C') {
-        //         skip_this_line = true;  // skip until next field
-        //     } else {
-        //         skip_this_line = false;
-        //         field_idx = 0;          // rewind
-        //         _store_field(data, size);
-        //     }
-        // } else if (!skip_this_line) {
-            /* Continue previous field */
-    //         _store_field(data, size);
-    //     }
-    // } else if (!skip_this_line) {
-        /* Called from "on_value" callback */
-        // if (last_call_is_field) {
-            /* New value begins */
-        //     value_idx = 0;             // rewind
-        //     _store_value(data, size);
-        // } else {
-            /* Continue previous value */
-//             _store_value(data, size);
-//         }
-//     }
-//     last_call_is_field = is_field;
-//     LOG3("Watchdog: Watched %lu bytes.\n", size);
-// }
-
-// bool HeaderWatchdog::has_found_target() {
-//     const char* target_field = "Connection";
-//     const char* target_value = "close";
-//     if (has_seen_target || ( \
-//             memcmp(field_buf, target_field, strlen(target_field)) == 0 && \
-//             memcmp(value_buf, target_value, strlen(target_value)) == 0 \
-//             )) {
-//         LOG3("Watchdog: Wof Wof! Found target '%s:%s'!\n", target_field, \
-//              target_value);
-//         return true;
-//     }
-//     return false;
-// }
-
 void HttpParser::do_parse(const char* data, size_t size) {
     first_eom = last_eom = NULL;  // reset end-of-msg pointers
     auto err = llhttp_execute(parser, data, size);
@@ -82,6 +30,21 @@ void HttpParser::init_all_settings() {
     llhttp_settings_init(&response_settings);
     response_settings.on_headers_complete = headers_complete_cb;
     response_settings.on_message_complete = message_complete_cb;
+}
+
+void raise_open_file_limit(size_t value) {
+    struct rlimit lim;
+    if (getrlimit(RLIMIT_NOFILE, &lim) < 0) {
+        ERROR_EXIT("Cannot getrlimit");
+    }
+    if (lim.rlim_max < value) {
+        ERROR_EXIT("Please raise hard limit of RLIMIT_NOFILE above %lu", value);
+    }
+    LOG1("Raising RLIMIT_NOFILE: %lu -> %lu\n", lim.rlim_cur, value);
+    lim.rlim_cur = value;
+    if (setrlimit(RLIMIT_NOFILE, &lim) < 0) {
+        ERROR_EXIT("Cannot setrlimit")
+    }
 }
 
 struct io_stat read_all(int fd, char* buffer, size_t max_size) {
@@ -119,60 +82,44 @@ struct io_stat write_all(int fd, const char* data, size_t size) {
     return stat;
 }
 
+size_t reply_with_503_unavailable(int sock) {
+    int file_fd = open("utils/503.html", O_RDONLY);
+    if (file_fd < 0) [[unlikely]] ERROR_EXIT("Cannot open 'utils/503.html'");
+    auto body_size = get_file_size(file_fd);
+    string header = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\n" \
+                    "Connection: close\r\nContent-Length: ";
+    header += to_string(body_size) + "\r\n\r\n";
+
+    // header
+    size_t count = min(header.size(), sizeof(global_buffer));
+    memcpy(global_buffer, header.c_str(), count);
+    // body
+    auto space = sizeof(global_buffer) - count;
+    count += read_all(file_fd, global_buffer + count, space).nbytes;
+    close(file_fd);
+    LOG3("Replying 503 unavailable to #%d...\n", sock);
+    return write_all(sock, global_buffer, count).nbytes;
+}
+
 void close_socket_gracefully(int fd) {
-    if (shutdown(fd, SHUT_WR) < 0) ERROR_EXIT("Shutdown error");
-    while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {
-        /* consume input */
+    if (shutdown(fd, SHUT_WR) < 0) { [[unlikely]]
+        ERROR_EXIT("Shutdown error");
     }
+    while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {/* consume */}
     if (read(fd, global_buffer, 1) == 0) {  // FIN arrived
         close(fd);
     } else {
         struct timeval timeout = {.tv_sec = SOCK_CLOSE_WAITTIME, .tv_usec = 0};
-        auto evt = new_read_event(fd, close_after_timeout, event_self_cbarg());
+        auto evt = new_timer(close_after_timeout, fd);
         add_event(evt, &timeout);
     }
 }
 
-void close_after_timeout(int fd, short flag, void* arg) {
-    auto evt = reinterpret_cast<struct event*>(arg);
-    if (flag & EV_TIMEOUT) {
-        del_event(evt);
-        close(fd);
-        LOG3("#%d timed out and were closed.\n", fd);
-    } else {
-        char buf[0x20];
-        while (read(fd, buf, sizeof(buf)) > 0) {}  // consume input
-    }
-}
-
-void raise_open_file_limit(size_t value) {
-    struct rlimit lim;
-    if (getrlimit(RLIMIT_NOFILE, &lim) < 0) {
-        ERROR_EXIT("Cannot getrlimit");
-    }
-    if (lim.rlim_max < value) {
-        ERROR_EXIT("Please raise hard limit of RLIMIT_NOFILE above %lu", value);
-    }
-    LOG1("Raising RLIMIT_NOFILE: %lu -> %lu\n", lim.rlim_cur, value);
-    lim.rlim_cur = value;
-    if (setrlimit(RLIMIT_NOFILE, &lim) < 0) {
-        ERROR_EXIT("Cannot setrlimit")
-    }
-}
-
-size_t reply_with_503_unavailable(int sock) {
-    // copy header
-    auto head = "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 60\r\n\r\n";
-    auto count = min(strlen(head), sizeof(global_buffer));
-    memcpy(global_buffer, head, count);
-    // copy body from file
-    int fd = open("utils/503.html", O_RDONLY);
-    auto stat = read_all(fd, global_buffer + count,
-                         sizeof(global_buffer) - count);
-    count += stat.nbytes;
-    close(fd);
-    LOG3("Replying 503 unavailable to #%d...\n", sock);
-    return write_all(sock, global_buffer, count).nbytes;
+void close_after_timeout(int/*fd*/, short/*flag*/, void* arg) {
+    auto t_arg = reinterpret_cast<struct timer_arg*>(arg);
+    close(t_arg->fd);
+    LOG3("#%d timed out and were closed.\n", t_arg->fd);
+    delete t_arg;
 }
 
 int passive_TCP(unsigned short port, int qlen) {
@@ -235,7 +182,8 @@ int put_slow_mode(const struct event_base*, const struct event* evt, void*) {
     auto cb = event_get_callback(evt);
     auto arg = event_get_callback_arg(evt);
     auto check_and_set_slow_mode = [](auto conn) {
-        if (!conn->is_in_transition()) conn->set_slow_mode();
+        if (!conn->is_in_transition() && conn->is_fast_mode())
+            conn->set_slow_mode();
     };
 
     if (cb == Client::on_readable || cb == Client::on_writable) {

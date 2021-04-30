@@ -1,31 +1,24 @@
-#include "../src/ls_proxy.h"
-// override macros
-#define HIST_CACHE_SIZE     17   // less than data total size
-#define MAX_HYBRID_SIZE  HIST_CACHE_SIZE
-#define SOCK_IO_BUF_SIZE    150  // more than twice data total size
-#define MAX_CIRCULAR_SIZE SOCK_IO_BUF_SIZE
-#define DASH30              "=============================="
-#define BEGIN(msg)          printf(msg)
-#define DONE()              printf("done.\n"); return true;
-// #define REPLACE_RET_FALSE_WITH_ASSERT
-#ifdef REPLACE_RET_FALSE_WITH_ASSERT
-#define ASSERT_OR_RET(cond) assert(cond);
-#else
-#define ASSERT_OR_RET(cond) if (!(cond)) return false;
-#endif
+#include "helper.h"
+/*
+ * ls_proxy.h should be adjusted first.
+ */
+#define HIST_CACHE_SIZE     17   // less than total size of data
+#define MAX_HYBRID_SIZE     HIST_CACHE_SIZE
+#define SOCK_IO_BUF_SIZE    150  // more than twice total size of data
+#define MAX_CIRCULAR_SIZE   SOCK_IO_BUF_SIZE
 
 
-char global_buffer[1024];
 Filebuf* filebuf = NULL;
 Hybridbuf* hybridbuf = NULL;
 Circularbuf* circularbuf = NULL;
-vector<Filebuf*> filebuf_pool;  // for temporary usage
+vector<Filebuf*> filebuf_tmp;  // to be recycled Filebufs
 vector<string> data = {
     "hello",
     "worldworldworldworldworldworldworldworld",
     "_-!",
     "\n \x01\x00\xde\xad\xbe\xef\x80\t\r\n."
 };
+
 
 void setup() {
     filebuf = new Filebuf();
@@ -37,7 +30,7 @@ void teardown() {
     delete filebuf;
     delete hybridbuf;
     delete circularbuf;
-    for (auto fb : filebuf_pool) {
+    for (auto fb : filebuf_tmp) {
         delete fb;
     }
 }
@@ -46,24 +39,24 @@ bool test_file_nonblocking() {
     BEGIN("Testing file nonblocking...");
     int fd = filebuf->get_fd();
     while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {}
-    DONE();
+    END();
 }
 
 bool _rw_helper(Filebuf* buf) {
-    // store to buffer
-    int count = 0;
+    // store data to buffer
+    size_t count = 0;
     for (auto d : data) {
         buf->store(d.c_str(), d.size());
         count += d.size();
     }
-    ASSERT_OR_RET(buf->data_size == count);
+    ASSERT_EQUAL(count, buf->data_size);
     buf->rewind();
 
-    // fetch from buffer (REF: read_all implementation)
+    // fetch from buffer (REF: read_all() implementation)
     char* ptr = global_buffer;
     int remain = count;
     while (remain > 0) {
-        count = buf->fetch(buf, remain);
+        count = buf->fetch(ptr, remain);
         if (count > 0) {
             ptr += count;  // move ptr
             remain -= count;
@@ -71,68 +64,70 @@ bool _rw_helper(Filebuf* buf) {
             break;
         }
     }
-    ASSERT_OR_RET(remain == 0);
+    ASSERT_EQUAL(0, remain);
     string all_data;
     for (auto d : data) all_data += d;
-    ASSERT_OR_RET(memcmp(all_data.c_str(), global_buffer, all_data.size()) == 0);
+    ASSERT_EQUAL(0, memcmp(all_data.c_str(), global_buffer, all_data.size()));
     return true;
 }
 
 bool test_file_rw() {
     BEGIN("Testing file r/w...");
-    ASSERT_OR_RET(_rw_helper(filebuf));
-    DONE();
+    ASSERT_TRUE(_rw_helper(filebuf));
+    END();
 }
 
 bool _clear_helper(Filebuf* buf) {
     // first time
     buf->store(data[0].c_str(), data[0].size());
     buf->clear();
-    int count = buf->fetch(global_buffer, sizeof(global_buffer));
-    ASSERT_OR_RET(count == -1 && errno == EAGAIN);
+    ASSERT_EQUAL(0, buf->data_size);
+    ASSERT_EQUAL(0, buf->fetch(global_buffer, sizeof(global_buffer)));
+
     // second time
     buf->store(data[1].c_str(), data[1].size());
     buf->clear();
-    count = buf->fetch(global_buffer, sizeof(global_buffer));
-    ASSERT_OR_RET(count == -1 && errno == EAGAIN);
+    ASSERT_EQUAL(0, buf->data_size);
+    ASSERT_EQUAL(0, buf->fetch(global_buffer, sizeof(global_buffer)));
     return true;
 }
 
 bool test_file_clear() {
     BEGIN("Testing file clear...");
-    ASSERT_OR_RET(_clear_helper(filebuf));
-    DONE();
+    ASSERT_TRUE(_clear_helper(filebuf));
+    END();
 }
 
 bool test_hybrid_rw() {
     BEGIN("Testing hybridbuf r/w...");
-    // overflow when memory is full, but the result should be correct
-    ASSERT_OR_RET(_rw_helper(hybridbuf));
-    DONE();   
+    // overflow to file when memory is full, but the result should be correct
+    ASSERT_TRUE(_rw_helper(hybridbuf));
+    END();   
 }
 
 bool test_hybrid_clear() {
     BEGIN("Testing hybridfile clear...");
-    ASSERT_OR_RET(_clear_helper(hybridbuf));
-    DONE();
+    ASSERT_TRUE(_clear_helper(hybridbuf));
+    END();
 }
 
 int _create_empty_fd_helper() {
     Filebuf* fb = new Filebuf();
-    filebuf_pool.push_back(fb);
+    filebuf_tmp.push_back(fb);
     return fb->get_fd();
 }
 
-// create a new Filebuf with data, and append it to filebuf_pool
-int _create_nonempty_fd_helper(int min_size = 1) {
+// create a new Filebuf with data, and append it to filebuf_tmp
+int _create_nonempty_fd_helper(size_t min_size = 1) {
     Filebuf* fb = new Filebuf();
-    filebuf_pool.push_back(fb);
+    filebuf_tmp.push_back(fb);
+
     while (fb->data_size < min_size) {
         for (auto d : data) {
             fb->store(d.c_str(), d.size());
         }
     }
-    ASSERT_OR_RET(fb->data_size > min_size);
+    ASSERT_TRUE(fb->data_size > min_size);
     fb->rewind();
     return fb->get_fd();
 }
@@ -140,67 +135,58 @@ int _create_nonempty_fd_helper(int min_size = 1) {
 bool test_circular_r() {
     BEGIN("Testing circularbuf read...");
     int fd = _create_nonempty_fd_helper();
-    auto fbuf = filebuf_pool.back();
+    auto fbuf = filebuf_tmp.back();
     auto stat = circularbuf->read_all_from(fd);
-    // should reach eof
-    ASSERT_OR_RET(stat.has_eof == true);
-    ASSERT_OR_RET(stat.nbytes == fbuf->data_size);
+
+    // should reach file's eof
+    ASSERT_EQUAL(true, stat.has_eof);
+    ASSERT_EQUAL(fbuf->data_size, stat.nbytes);
     // check for size/space functions
-    int space = circularbuf->remaining_space();
-    int size = circularbuf->data_size();
-    ASSERT_OR_RET(stat.nbytes == size);
-    ASSERT_OR_RET(size + space == MAX_CIRCULAR_SIZE);
-    DONE();
+    auto space = circularbuf->remaining_space();
+    auto size = circularbuf->data_size();
+    ASSERT_EQUAL(stat.nbytes, size);
+    ASSERT_EQUAL(MAX_CIRCULAR_SIZE, size + space);
+    END();
 }
 
 bool test_circular_overflow() {
     BEGIN("Testing circularbuf overflow...");
     int fd = _create_nonempty_fd_helper(MAX_CIRCULAR_SIZE);    
     auto stat = circularbuf->read_all_from(fd);
-    // should not reach eof
-    ASSERT_OR_RET(stat.has_eof == false);
-    // should not overflow (last byte don't store data)
-    ASSERT_OR_RET(circularbuf->data_size() < MAX_CIRCULAR_SIZE);
-    // check for size/space functions
-    int space = circularbuf->remaining_space();
-    int size = circularbuf->data_size();
-    ASSERT_OR_RET(stat.nbytes == size);
-    ASSERT_OR_RET(size + space == MAX_CIRCULAR_SIZE);
-    DONE();
-}
 
-// compare if the data within the two fd are the same
-bool _compare_fd_helper(int fd1, int fd2) {
-    char local_buffer [sizeof(global_buffer)];
-    int n1 = read_all(fd1, global_buffer, sizeof(global_buffer)).nbytes;
-    int n2 = read_all(fd2, local_buffer, sizeof(local_buffer)).nbytes;
-    ASSERT_OR_RET(n1 == n2);
-    ASSERT_OR_RET(memcmp(global_buffer, local_buffer, n1) == 0);
-    return true;
+    // should not reach eof
+    ASSERT_EQUAL(false, stat.has_eof);
+    // should not overflow (last byte don't store data)
+    ASSERT_TRUE(circularbuf->data_size() < MAX_CIRCULAR_SIZE);
+    // check for size/space functions
+    auto space = circularbuf->remaining_space();
+    auto size = circularbuf->data_size();
+    ASSERT_EQUAL(stat.nbytes, size);
+    ASSERT_EQUAL(MAX_CIRCULAR_SIZE, size + space);
+    END();
 }
 
 bool test_circular_w() {
-    BEGIN("Testing circularbuf write...", );
+    BEGIN("Testing circularbuf write...");
     // fill buffer
     int fd = _create_nonempty_fd_helper(MAX_CIRCULAR_SIZE);
-    auto fbuf = filebuf_pool.back();
+    auto fbuf = filebuf_tmp.back();
     auto stat = circularbuf->read_all_from(fd);
     // write out
     int fd_out = _create_empty_fd_helper();
-    auto fbuf_out = filebuf_pool.back();
+    auto fbuf_out = filebuf_tmp.back();
     stat = circularbuf->write_all_to(fd_out);
-    // buffer should be empty
-    ASSERT_OR_RET(circularbuf->data_size == 0);
 
+    // buffer should be empty
+    ASSERT_EQUAL(0, circularbuf->data_size());
     // compare
     fbuf->rewind();
     fbuf_out->rewind();
-    ASSERT_OR_RET(_compare_fd_helper(fbuf->get_fd(), fbuf_out->get_fd()));
-    DONE();
+    ASSERT_TRUE(compare_fd_helper(fbuf->get_fd(), fbuf_out->get_fd()));
+    END();
 }
 
 int main() {
-    typedef bool (*Test)();
     Test tests[] = {
         test_file_nonblocking,
         test_file_rw,
@@ -212,7 +198,7 @@ int main() {
         test_circular_w,
     };
     int failed = 0;
-    for (auto t in tests) {
+    for (auto t : tests) {
         setup();
         if (!t()) {
             failed++;
@@ -220,6 +206,7 @@ int main() {
         }
         teardown();
     }
+
     printf("\n" DASH30 DASH30);
     if (failed > 0) {
         printf("%23s%d TEST FAILED!", "", failed);

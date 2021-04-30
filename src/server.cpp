@@ -10,14 +10,15 @@ Server::Server(Connection* _conn): conn{_conn}, queued_output{NULL} {
     if (evutil_make_socket_nonblocking(sock) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot make socket nonblocking");
     }
-    LOG2("[SERVER] Connection opened (#%d) (active: %d)\n", sock,
+    LOG2("[SERVER] Connection created (#%d) (active: %d)\n", sock,
          ++Server::connection_count);
     read_evt = new_read_event(sock, Server::on_readable, this);
     write_evt = new_write_event(sock, Server::on_writable, this);
 }
 
 Server::~Server() {
-    LOG2("[SERVER] Connection closed (active: %u)\n", --Server::connection_count);
+    LOG2("[SERVER] Connection closed (#%d) (active: %u)\n", get_fd(), \
+         --Server::connection_count);
     close_socket_gracefully(get_fd());
     del_event(read_evt);
     del_event(write_evt);
@@ -30,7 +31,7 @@ void Server::recv_to_buffer_slowly(int fd) {
     auto client = conn->client;
     auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
     client->response_buf->store(global_buffer, stat.nbytes);
-    LOG2("[%s] %9s response <<<< %-6lu [SERVER]\n", client->c_addr(), "", \
+    LOG2("[%s] %9s| response <<<< %-6lu [SERVER]\n", client->c_addr(), "", \
          stat.nbytes);
     try {
         conn->parser->do_parse(global_buffer, stat.nbytes);
@@ -40,7 +41,6 @@ void Server::recv_to_buffer_slowly(int fd) {
         conn->free_parser();
         if (client->response_buf->data_size > 0) {
             client->set_reply_only_mode();
-            client->resume_rw();
         } else {
             delete conn;
         }
@@ -64,7 +64,7 @@ void Server::send_request_slowly(int fd) {
         if (nbytes < (size_t)count) {
             client->request_buf->rewind(count - nbytes);
         }
-        LOG2("[%s] %9s request >>>> %-6lu [SERVER]\n", client->c_addr(), "", \
+        LOG2("[%s] %9s| request >>>> %-6lu [SERVER]\n", client->c_addr(), "", \
              nbytes);
     } else if (count == 0) {  // done forwarding
         del_event(write_evt);
@@ -97,7 +97,7 @@ void Server::on_readable(int fd, short flag, void* arg) {
                 return;
             }
             client->response_buf->store(global_buffer, stat.nbytes);
-            LOG2("[%s] %9s response <<<< %-6lu [SERVER]\n", client->c_addr(), \
+            LOG2("[%s] %9s| response <<<< %-6lu [SERVER]\n", client->c_addr(), \
                  "", stat.nbytes);
         }
     } else {

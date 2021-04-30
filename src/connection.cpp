@@ -115,5 +115,5 @@ void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
     Connection* conn = new Connection();
     conn->client = new Client(sock, addr, conn);
     add_event(conn->client->read_evt);
-    LOG1("[%s] Connection opened (#%d)\n", conn->client->c_addr(), sock);
+    LOG1("[%s] Connection created (#%d)\n", conn->client->c_addr(), sock);
 }

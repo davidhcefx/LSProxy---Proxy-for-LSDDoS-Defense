@@ -53,12 +53,18 @@ void Client::recv_to_buffer_slowly(int fd) {
         pause_rw();
         request_buf->rewind();  // for further reads
         conn->parser->switch_to_response_mode();
-        conn->server = new Server(conn);
+        try {
+            conn->server = new Server(conn);
+        } catch (ConnectionError& err) {
+            reply_with_503_unavailable(fd);
+            delete conn;
+            return;
+        }
         add_event(conn->server->write_evt);
         add_event(conn->server->read_evt);
     } else {
         request_buf->store(global_buffer, nbytes);
-        LOG2("[%s] %6lu >>>> request\n", c_addr(), nbytes);
+        LOG2("[%s] %6lu >>>> request |\n", c_addr(), nbytes);
     }
 }
 
@@ -69,9 +75,12 @@ void Client::send_response_slowly(int fd) {
         if (nbytes < (size_t)count) {
             response_buf->rewind(count - nbytes);
         }
-        LOG2("[%s] %6lu <<<< response\n", c_addr(), nbytes);
+        LOG2("[%s] %6lu <<<< response |\n", c_addr(), nbytes);
     } else if (count == 0) {  // no data to forward
         del_event(write_evt);
+        if (!conn->parser) {  // parser freed (reply-only mode)
+            delete conn;
+        }
     }
 }
 
