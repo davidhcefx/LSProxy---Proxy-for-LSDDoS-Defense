@@ -103,15 +103,14 @@ size_t reply_with_503_unavailable(int sock) {
 
 void close_socket_gracefully(int fd) {
     if (shutdown(fd, SHUT_WR) < 0) { [[unlikely]]
-        ERROR_EXIT("Shutdown error");
+        ERROR_EXIT("Shutdown error #(%d)", fd);
     }
     while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {/* consume */}
     if (read(fd, global_buffer, 1) == 0) {  // FIN arrived
         close(fd);
     } else {
-        struct timeval timeout = {.tv_sec = SOCK_CLOSE_WAITTIME, .tv_usec = 0};
         auto evt = new_timer(close_after_timeout, fd);
-        add_event(evt, &timeout);
+        add_event_with_timeout(evt, SOCK_CLOSE_WAITTIME);
     }
 }
 
@@ -175,23 +174,42 @@ void break_event_loop(int/*sig*/) {
 }
 
 void put_all_connection_slow_mode(int/*sig*/) {
-    event_base_foreach_event(evt_base, put_slow_mode, NULL);
+    /* When a signal arrived, the event being processed would be interrupted,
+      which could lead to unsafe connection state. So we postpone our action
+      by adding a new event. */
+    auto evt_list = new vector<const struct event*>;
+    event_base_foreach_event(evt_base, add_to_list, evt_list);
+    auto e = new_timer(put_events_slow_mode, evt_list);
+    add_event_with_timeout(e, 1);  // schedule 1s later
+    LOG3("Scheduled %lu events to be inspected.\n", evt_list->size());
 }
 
-int put_slow_mode(const struct event_base*, const struct event* evt, void*) {
-    auto cb = event_get_callback(evt);
-    auto arg = event_get_callback_arg(evt);
-    auto check_and_set_slow_mode = [](auto conn) {
-        if (!conn->is_in_transition() && conn->is_fast_mode())
-            conn->set_slow_mode();
-    };
-
-    if (cb == Client::on_readable || cb == Client::on_writable) {
-        check_and_set_slow_mode((reinterpret_cast<Client*>(arg))->conn);
-    } else if (cb == Server::on_readable || cb == Server::on_writable) {
-        check_and_set_slow_mode((reinterpret_cast<Server*>(arg))->conn);
-    }
+int add_to_list(const struct event_base*, const struct event* evt, void* arg) {
+    auto evt_list = reinterpret_cast<vector<const struct event*>*>(arg);
+    evt_list->push_back(evt);
     return 0;
+}
+
+void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg) {
+    auto t_arg = reinterpret_cast<struct timer_arg*>(arg);
+    for (auto evt : *(t_arg->evt_list)) {
+        auto cb = event_get_callback(evt);
+        auto cb_arg = event_get_callback_arg(evt);
+        auto check_and_set = [](auto conn, auto evt) {
+            // check event exists, conn not slow mode and not transitioning
+            if (event_pending(evt, EV_READ | EV_WRITE, NULL) \
+                    && conn->is_fast_mode() && !conn->is_in_transition()) {
+                conn->set_slow_mode();
+            }
+        };
+        if (cb == Client::on_readable || cb == Client::on_writable) {
+            check_and_set(reinterpret_cast<Client*>(cb_arg)->conn, evt);
+        } else if (cb == Server::on_readable || cb == Server::on_writable) {
+            check_and_set(reinterpret_cast<Server*>(cb_arg)->conn, evt);
+        }  // else can be other things
+    }
+    delete t_arg->evt_list;
+    delete t_arg;
 }
 
 int close_event_fd(const struct event_base*, const struct event* evt, void*) {

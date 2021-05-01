@@ -18,6 +18,7 @@
 #include <climits>
 #include <string>
 #include <memory>
+#include <vector>
 #include <queue>
 #include <algorithm>
 #include "llhttp/llhttp.h"
@@ -57,6 +58,7 @@ using std::string;
 using std::to_string;
 using std::shared_ptr;
 using std::make_shared;
+using std::vector;
 using std::queue;
 using std::exception;
 using std::min;
@@ -107,6 +109,8 @@ using std::swap;
  * [x] Detect server down
  */
 
+
+// TODO: set a timestamp at certain times
 
 /* struct for storing read/write return values */
 struct io_stat {
@@ -294,6 +298,7 @@ extern queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 class Connection;
 void add_event(struct event* evt, const struct timeval* timeout = NULL);
 void del_event(struct event* evt);
+void free_event(struct event* evt);
 
 
 /* class for handling client io */
@@ -427,6 +432,12 @@ inline string get_host_and_port(const struct sockaddr_in& addr) {
     return string(get_host(addr)) + ":" + to_string(get_port(addr));
 }
 
+inline ssize_t get_file_size(int fd) {
+    struct stat info;
+    if (fstat(fd, &info) < 0) [[unlikely]] ERROR_EXIT("Cannot fstat");
+    return info.st_size;
+}
+
 // raise system-wide RLIMIT_NOFILE
 void raise_open_file_limit(size_t value);
 // read as much as possible
@@ -435,28 +446,23 @@ struct io_stat read_all(int fd, char* buffer, size_t max_size);
 struct io_stat write_all(int fd, const char* data, size_t size);
 // reply with contents of 'res/503.html' and return num of bytes written
 size_t reply_with_503_unavailable(int sock);
-
-inline ssize_t get_file_size(int fd) {
-    struct stat info;
-    if (fstat(fd, &info) < 0) [[unlikely]] ERROR_EXIT("Cannot fstat");
-    return info.st_size;
-}
-
 // shutdown write; wait SOCK_CLOSE_WAITTIME seconds (async) for FIN packet
 void close_socket_gracefully(int fd);
-// consume input; when timeout close fd and remove event
+// timer callback
 void close_after_timeout(int fd, short flag, void* arg);
 // return master socket Fd
 int passive_TCP(unsigned short port, int qlen = 128);
 // return socket Fd; host can be either hostname or IP address
 int connect_TCP(const char* host, unsigned short port);
-// signal handler
+// break event_base loop on signal
 void break_event_loop(int/*sig*/);
-// signal handler
+// put current connections to slow-mode on signal
 void put_all_connection_slow_mode(int/*sig*/);
-// event_base callback
-int put_slow_mode(const struct event_base*, const struct event*, void*);
-// event_base callback
+// event_base callback; arg is of type vector<struct event*>*
+int add_to_list(const struct event_base*, const struct event* evt, void* arg);
+// timer callback; scan a list of events and put them to slow-mode
+void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg);
+// close each event's fd
 int close_event_fd(const struct event_base*, const struct event*, void*);
 
 /* Parser callbacks */
@@ -465,6 +471,19 @@ int message_complete_cb(llhttp_t* parser, const char* at, size_t length);
 
 /* Event wrappers */
 extern struct event_base* evt_base;
+
+/* struct for packing two args into one */
+struct timer_arg {
+    struct event* evt_self;
+    union {
+        int fd;
+        vector<const struct event*>* evt_list;
+    };
+    explicit timer_arg(int _fd) { fd = _fd; }
+    explicit timer_arg(vector<const struct event*>* lst) { evt_list = lst; }
+    ~timer_arg() { del_event(evt_self); free_event(evt_self); }
+};
+
 inline struct event* new_read_event(int fd, event_callback_fn cb, void* arg = NULL) {
     return event_new(evt_base, fd, EV_READ | EV_PERSIST, cb, arg);
 }
@@ -473,10 +492,29 @@ inline struct event* new_write_event(int fd, event_callback_fn cb, void* arg = N
     return event_new(evt_base, fd, EV_WRITE | EV_PERSIST, cb, arg);
 }
 
+inline struct event* __new_timer(event_callback_fn cb, struct timer_arg* arg) {
+    return (arg->evt_self = evtimer_new(evt_base, cb, arg));
+}
+
+// one-shot timer; cb's arg is of type struct timer_arg* (needs to be freed)
+inline struct event* new_timer(event_callback_fn cb, int fd) {
+    return __new_timer(cb, new struct timer_arg(fd));
+}
+
+inline struct event* new_timer(event_callback_fn cb, vector<const struct event*>* lst) {
+    return __new_timer(cb, new struct timer_arg(lst));
+}
+
 inline void add_event(struct event* evt, const struct timeval* timeout) {
     if (event_add(evt, timeout) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot add event");
     }
+}
+
+// when called on a pending event, its timeout would be rescheduled
+inline void add_event_with_timeout(struct event* evt, int seconds) {
+    struct timeval timeout = {.tv_sec = seconds, .tv_usec = 0};
+    add_event(evt, &timeout);
 }
 
 inline void del_event(struct event* evt) {
@@ -486,20 +524,5 @@ inline void del_event(struct event* evt) {
 }
 
 inline void free_event(struct event* evt) { event_free(evt); }
-
-/* struct for packing two args into one */
-struct timer_arg {
-    struct event* evt;
-    union {
-        int fd;
-    };
-    explicit timer_arg(int _fd) { fd = _fd; }
-    ~timer_arg() { del_event(evt); free_event(evt); }
-};
-
-inline struct event* new_timer(event_callback_fn cb, int fd) {
-    struct timer_arg* arg = new struct timer_arg(fd);
-    return (arg->evt = evtimer_new(evt_base, cb, arg));
-}
 
 #endif  // SRC_LS_PROXY_H_

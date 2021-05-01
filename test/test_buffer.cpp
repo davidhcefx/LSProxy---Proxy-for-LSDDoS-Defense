@@ -146,6 +146,7 @@ bool test_circular_r() {
     auto size = circularbuf->data_size();
     ASSERT_EQUAL(stat.nbytes, size);
     ASSERT_EQUAL(MAX_CIRCULAR_SIZE, size + space);
+
     END();
 }
 
@@ -163,6 +164,7 @@ bool test_circular_overflow() {
     auto size = circularbuf->data_size();
     ASSERT_EQUAL(stat.nbytes, size);
     ASSERT_EQUAL(MAX_CIRCULAR_SIZE, size + space);
+
     END();
 }
 
@@ -183,6 +185,7 @@ bool test_circular_w() {
     fbuf->rewind();
     fbuf_out->rewind();
     ASSERT_TRUE(compare_fd_helper(fbuf->get_fd(), fbuf_out->get_fd()));
+
     END();
 }
 

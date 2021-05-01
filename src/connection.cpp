@@ -19,9 +19,7 @@ void Connection::set_slow_mode() {
 
     // pause client, wait until server finished its msg then close server
     client->pause_rw();
-    struct timeval timeout = {.tv_sec = TRANSIT_TIMEOUT, .tv_usec = 0};
-    del_event(server->read_evt);
-    add_event(server->read_evt, &timeout);  // attach a timeout to recv
+    add_event_with_timeout(server->read_evt, TRANSIT_TIMEOUT);
     if (server->queued_output->data_size() > 0) {
         add_event(server->write_evt);
     } else {
@@ -41,9 +39,6 @@ void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
     auto queue_s = server->queued_output;
     auto stat_c = read_all(client->get_fd(), global_buffer,
                            queue_s->remaining_space());
-    if (stat_c.has_error && errno != EAGAIN && errno != EINTR) { [[unlikely]]
-        ERROR("Read failed (#%d)", client->get_fd());
-    }
     try {
         client->keep_track_request_history(global_buffer, stat_c.nbytes);
     } catch (ParserError& err) {

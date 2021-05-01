@@ -27,9 +27,13 @@ Client::~Client() {
 }
 
 void Client::recv_to_buffer_slowly(int fd) {
-    auto nbytes = read_all(fd, global_buffer, sizeof(global_buffer)).nbytes;
+    auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
+    if (stat.has_eof) { [[unlikely]]  // client closed
+        delete conn;
+        return;
+    }
     try {
-        conn->parser->do_parse(global_buffer, nbytes);
+        conn->parser->do_parse(global_buffer, stat.nbytes);
     } catch (ParserError& err) {
         // close connection
         assert(!conn->server);  // server only exists when client paused
@@ -44,10 +48,10 @@ void Client::recv_to_buffer_slowly(int fd) {
     if (auto end_ptr = conn->parser->get_first_end_of_msg()) {
         LOG2("[%s] Request completed.\n", c_addr());
         // store first msg to request_buf, the remaining to request_tmp_buf
-        size_t first_size = end_ptr - global_buffer;
-        request_buf->store(global_buffer, first_size);
-        if (nbytes - first_size > 0) {
-            request_tmp_buf->store(end_ptr, nbytes - first_size);
+        auto part1_size = end_ptr - global_buffer;
+        request_buf->store(global_buffer, part1_size);
+        if (stat.nbytes - part1_size > 0) { [[unlikely]]
+            request_tmp_buf->store(end_ptr, stat.nbytes - part1_size);
         }
         // pause client, rewind buffers and interact with server
         pause_rw();
@@ -63,8 +67,8 @@ void Client::recv_to_buffer_slowly(int fd) {
         add_event(conn->server->write_evt);
         add_event(conn->server->read_evt);
     } else {
-        request_buf->store(global_buffer, nbytes);
-        LOG2("[%s] %6lu >>>> request |\n", c_addr(), nbytes);
+        request_buf->store(global_buffer, stat.nbytes);
+        LOG2("[%s] %6lu >>>> request |\n", c_addr(), stat.nbytes);
     }
 }
 
