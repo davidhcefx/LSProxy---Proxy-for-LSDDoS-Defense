@@ -20,31 +20,36 @@
 #include <memory>
 #include <vector>
 #include <queue>
+#include <unordered_set>
 #include <algorithm>
 #include "llhttp/llhttp.h"
-#define MAX_CONNECTION    6  // 65536    // adjust it if needed // TODO: automatically setup
+#define MAX_CONNECTION    6  //65536    // adjust it if needed? TODO: automatically setup
 #define MAX_HYBRIDBUF     MAX_CONNECTION
-#define MAX_FILE_DSC      6 * MAX_CONNECTION + 6  // see FILE_DESCRIPTOR_MAP
-#define SOCK_IO_BUF_SIZE  10  // 10 * 1024  // socket io buffer size (KB)
-#define HIST_CACHE_SIZE   8  // 8 * 1024  // in-mem cache for request history (KB)
-#define SOCK_CLOSE_WAITTIME  10  // 30  // the timeout before leaving FIN-WAIT-2
-#define TRANSIT_TIMEOUT   4  // the timeout before transition finished
+#define MAX_FILE_DSC      7 * MAX_CONNECTION + 6  // see FILE_DESCRIPTOR_MAP
+#define SOCK_IO_BUF_SIZE  10  //10 * 1024  // socket io buffer size (KB)
+#define HIST_CACHE_SIZE   8  //8 * 1024   // in-mem cache for request history (KB)
+#define SOCK_CLOSE_WAITTIME 10  //30       // the timeout before leaving FIN-WAIT-2
+#define MONITOR_INTERVAL  10  // the frequency of monitoring transfer rate (s)
+#define TRANSFER_RATE_THRES 1000     // transfer rate threshold (B/s)
+#define TRANS_TIMEOUT     4   // timeout before slow-mode transition finish
 // #define MAX_BODY_SIZE     ULONG_MAX  // 2^64 B
-#define LOG_LEVEL_1       // basic connection info
-#define LOG_LEVEL_2       // kind of noisy
+#define __BLANK_10        "          "
+#define LOG_LEVEL_1       // minimal info
+#define LOG_LEVEL_2       // abundant info
 #define LOG_LEVEL_3       // very verbose
 #ifdef  LOG_LEVEL_1
-#define LOG1(...)         { printf(__VA_ARGS__); }
+#define LOG1(fmt, ...) \
+    { printf("%-10lu |" fmt, time(NULL) __VA_OPT__(,) __VA_ARGS__); }
 #else
 #define LOG1(...)         {}
 #endif  // LOG_LEVEL_1
 #ifdef  LOG_LEVEL_2
-#define LOG2(...)         { printf(__VA_ARGS__); }
+#define LOG2(...)         { printf(__BLANK_10 " |" __VA_ARGS__); }
 #else
 #define LOG2(...)         {}
 #endif  // LOG_LEVEL_2
 #ifdef  LOG_LEVEL_3
-#define LOG3(...)         { printf(__VA_ARGS__); }
+#define LOG3(...)         { printf(__BLANK_10 " |" __VA_ARGS__); }
 #else
 #define LOG3(...)         {}
 #endif  // LOG_LEVEL_3
@@ -60,6 +65,7 @@ using std::shared_ptr;
 using std::make_shared;
 using std::vector;
 using std::queue;
+using std::unordered_set;
 using std::exception;
 using std::min;
 using std::swap;
@@ -96,21 +102,19 @@ using std::swap;
  *     4 ~ n+3  Hybridbuf for history (one per connection)
  *   n+4 ~ n+6  event_base use around 3
  *   n+7 ~ 3n+6 Client & Server sockets (1-2 per conn)
- *  3n+7 ~ 6n+6 Filebuf for slow buffers (0-3 per conn)
+ *  3n+7 ~ 7n+6 Filebuf for slow buffers (0-4 per conn)
  *
  * Progress:
  * [x] Event-based arch.
  * [x] Fast-mode
  * [x] History temp
  * [x] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
- * [ ] Transfer rate monitor
+ * [x] Transfer rate monitor
  * [x] Transition logic
  * [-] Shorter keep-alive timeout
  * [x] Detect server down
  */
 
-
-// TODO: set a timestamp at certain times
 
 /* struct for storing read/write return values */
 struct io_stat {
@@ -309,6 +313,7 @@ class Client {
     struct event* write_evt;
     Connection* conn;
     Circularbuf* queued_output;  // queued output for fast-mode
+    size_t recv_count;           // number of bytes received from client
     /* Slow-mode buffers */
     Filebuf* request_buf;        // buffer for a single request
     Filebuf* request_tmp_buf;    // temp buffer for overflow requests
@@ -331,8 +336,8 @@ class Client {
         start_send();
         LOG3("[%s] Client been set to reply-only mode.\n", c_addr());
     }
-    void pause_rw() { stop_recv(); stop_send(); LOG3("Client paused.\n"); }
-    void resume_rw() { start_recv(); start_send(); LOG3("Client resumed.\n"); }
+    void pause_rw() { stop_recv(); stop_send(); LOG3("[%s] Paused.\n", c_addr()); }
+    void resume_rw() { start_recv(); start_send(); LOG3("[%s] Resumed.\n", c_addr()); }
     // keep track of incomplete requests; throw ParserError
     void keep_track_request_history(const char* data, size_t size);
     void copy_history_to(Filebuf* filebuf) {
@@ -346,7 +351,6 @@ class Client {
 
  private:
     shared_ptr<Hybridbuf> request_history;
-    //// transfer_rate;
 
     void stop_recv() { del_event(read_evt); }
     void stop_send() { del_event(write_evt); }
@@ -449,7 +453,7 @@ size_t reply_with_503_unavailable(int sock);
 // shutdown write; wait SOCK_CLOSE_WAITTIME seconds (async) for FIN packet
 void close_socket_gracefully(int fd);
 // timer callback
-void close_after_timeout(int fd, short flag, void* arg);
+void close_after_timeout(int/*fd*/, short/*flag*/, void* arg);
 // return master socket Fd
 int passive_TCP(unsigned short port, int qlen = 128);
 // return socket Fd; host can be either hostname or IP address
@@ -458,10 +462,12 @@ int connect_TCP(const char* host, unsigned short port);
 void break_event_loop(int/*sig*/);
 // put current connections to slow-mode on signal
 void put_all_connection_slow_mode(int/*sig*/);
-// event_base callback; arg is of type vector<struct event*>*
+// add evt to arg, which is of type vector<struct event*>*
 int add_to_list(const struct event_base*, const struct event* evt, void* arg);
 // timer callback; scan a list of events and put them to slow-mode
 void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg);
+// check transfer rate of all clients, and put suspicious ones to slow-mode
+void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/);
 // close each event's fd
 int close_event_fd(const struct event_base*, const struct event*, void*);
 
@@ -505,6 +511,10 @@ inline struct event* new_timer(event_callback_fn cb, vector<const struct event*>
     return __new_timer(cb, new struct timer_arg(lst));
 }
 
+inline struct event* new_persist_timer(event_callback_fn cb, void* arg = NULL) {
+    return event_new(evt_base, -1, EV_PERSIST, cb, arg);
+}
+
 inline void add_event(struct event* evt, const struct timeval* timeout) {
     if (event_add(evt, timeout) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot add event");
@@ -524,5 +534,18 @@ inline void del_event(struct event* evt) {
 }
 
 inline void free_event(struct event* evt) { event_free(evt); }
+
+// get associated Connection ptr or NULL
+inline Connection* get_associated_conn(const struct event* evt) {
+    auto cb = event_get_callback(evt);
+    auto arg = event_get_callback_arg(evt);
+    if (cb == Client::on_readable || cb == Client::on_writable) {
+        return reinterpret_cast<Client*>(arg)->conn;
+    } else if (cb == Server::on_readable || cb == Server::on_writable) {
+        return reinterpret_cast<Server*>(arg)->conn;
+    } else {
+        return NULL;
+    }
+}
 
 #endif  // SRC_LS_PROXY_H_

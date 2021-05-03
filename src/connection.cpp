@@ -19,8 +19,8 @@ void Connection::set_slow_mode() {
 
     // pause client, wait until server finished its msg then close server
     client->pause_rw();
-    add_event_with_timeout(server->read_evt, TRANSIT_TIMEOUT);
-    if (server->queued_output->data_size() > 0) {
+    add_event_with_timeout(server->read_evt, TRANS_TIMEOUT);
+    if (server->queued_output->data_size() > 0) { [[unlikely]]
         add_event(server->write_evt);
     } else {
         server->free_queued_output();
@@ -36,9 +36,9 @@ void Connection::set_slow_mode() {
 
 void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
     // first store to global_buffer
-    auto queue_s = server->queued_output;
     auto stat_c = read_all(client->get_fd(), global_buffer,
-                           queue_s->remaining_space());
+                           server->queued_output->remaining_space());
+    client->recv_count += stat_c.nbytes;
     try {
         client->keep_track_request_history(global_buffer, stat_c.nbytes);
     } catch (ParserError& err) {
@@ -53,10 +53,10 @@ void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
         return;
     }
     // then append to server's queued output, and write them out
-    assert(queue_s->copy_from(global_buffer, stat_c.nbytes) == stat_c.nbytes);
-    auto stat_s = queue_s->write_all_to(server->get_fd());
+    server->queued_output->copy_from(global_buffer, stat_c.nbytes);
+    auto stat_s = server->queued_output->write_all_to(server->get_fd());
     LOG2("[%s] %6lu >>>> queue(%lu) >>>> %-6lu [SERVER]\n", client->c_addr(),
-         stat_c.nbytes, queue_s->data_size(), stat_s.nbytes);
+         stat_c.nbytes, server->queued_output->data_size(), stat_s.nbytes);
     if (stat_c.has_eof) { [[unlikely]]  // client closed
         delete this;
         return;

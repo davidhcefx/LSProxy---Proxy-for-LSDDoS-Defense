@@ -42,7 +42,9 @@ void run_proxy() {
 
     // setup parser and signal handlers
     HttpParser::init_all_settings();
-    if (signal(SIGINT, break_event_loop) == SIG_ERR) {
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        ERROR_EXIT("Cannot disable SIGPIPE");
+    }    if (signal(SIGINT, break_event_loop) == SIG_ERR) {
         ERROR_EXIT("Cannot set SIGINT handler");
     }
     if (signal(SIGUSR1, put_all_connection_slow_mode) == SIG_ERR) {

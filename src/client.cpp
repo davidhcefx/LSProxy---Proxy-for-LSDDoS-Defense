@@ -3,7 +3,7 @@
 
 Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
     addr{get_host_and_port(_addr)}, conn{_conn}, queued_output{NULL},
-    request_buf{NULL}, request_tmp_buf{NULL}, response_buf{NULL}
+    recv_count{0}, request_buf{NULL}, request_tmp_buf{NULL}, response_buf{NULL}
 {
     read_evt = new_read_event(fd, Client::on_readable, this);
     write_evt = new_write_event(fd, Client::on_writable, this);
@@ -13,8 +13,8 @@ Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
 }
 
 Client::~Client() {
-    LOG1("[%s]: Connection closed.\n", c_addr());
-    close_socket_gracefully(get_fd());
+    LOG1("[%s] Connection closed.\n", c_addr());
+    close_socket_gracefully(get_fd());   // TODO: cannot call del_event after this?
     del_event(read_evt);
     del_event(write_evt);
     free_event(read_evt);
@@ -28,7 +28,8 @@ Client::~Client() {
 
 void Client::recv_to_buffer_slowly(int fd) {
     auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
-    if (stat.has_eof) { [[unlikely]]  // client closed
+    LOG2("[%s] %6lu >>>> request |\n", c_addr(), stat.nbytes);
+    if (stat.has_eof) {  // client closed
         delete conn;
         return;
     }
@@ -68,19 +69,19 @@ void Client::recv_to_buffer_slowly(int fd) {
         add_event(conn->server->read_evt);
     } else {
         request_buf->store(global_buffer, stat.nbytes);
-        LOG2("[%s] %6lu >>>> request |\n", c_addr(), stat.nbytes);
     }
 }
 
 void Client::send_response_slowly(int fd) {
     auto count = response_buf->fetch(global_buffer, sizeof(global_buffer));
     if (count > 0) {
-        auto nbytes = write_all(fd, global_buffer, count).nbytes;
-        if (nbytes < (size_t)count) {
-            response_buf->rewind(count - nbytes);
+        auto stat = write_all(fd, global_buffer, count);
+        if (stat.nbytes < (size_t)count) [[unlikely]] {
+            response_buf->rewind(count - stat.nbytes);
         }
-        LOG2("[%s] %6lu <<<< response |\n", c_addr(), nbytes);
+        LOG2("[%s] %6lu <<<< response |\n", c_addr(), stat.nbytes);
     } else if (count == 0) {  // no data to forward
+        LOG2("[%s] %6s <<<< response |\n", c_addr(), "0");
         del_event(write_evt);
         if (!conn->parser) {  // parser freed (reply-only mode)
             delete conn;
@@ -131,8 +132,9 @@ void Client::on_writable(int fd, short/*flag*/, void* arg) {
     auto conn = client->conn;
     if (conn->is_fast_mode()) {
         if (!conn->server) { [[unlikely]]  // server closed (reply-only mode)
-            client->queued_output->write_all_to(fd);
-            if (client->queued_output->data_size() == 0) {
+            auto stat = client->queued_output->write_all_to(fd);
+            if ((stat.has_error && errno != EAGAIN && errno != EINTR) \
+                    || (client->queued_output->data_size() == 0)) {
                 delete conn;
             }
         } else {
@@ -140,9 +142,9 @@ void Client::on_writable(int fd, short/*flag*/, void* arg) {
             add_event(conn->server->read_evt);
             del_event(client->write_evt);
             // write some
-            auto nbytes = client->queued_output->write_all_to(fd).nbytes;
+            auto stat = client->queued_output->write_all_to(fd);
             LOG2("[%s] %6lu <<<< queue(%lu)\n", client->c_addr(),
-                 nbytes, client->queued_output->data_size());
+                 stat.nbytes, client->queued_output->data_size());
         }
     } else {
         /* Slow mode */

@@ -103,21 +103,23 @@ size_t reply_with_503_unavailable(int sock) {
 
 void close_socket_gracefully(int fd) {
     if (shutdown(fd, SHUT_WR) < 0) { [[unlikely]]
-        ERROR_EXIT("Shutdown error #(%d)", fd);
+        WARNING("Shutdown write (#%d): %s", fd, strerror(errno));
     }
     while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {/* consume */}
     if (read(fd, global_buffer, 1) == 0) {  // FIN arrived
         close(fd);
+        LOG3("#%d closed.\n", fd);
     } else {
         auto evt = new_timer(close_after_timeout, fd);
         add_event_with_timeout(evt, SOCK_CLOSE_WAITTIME);
+        // TODO(davidhcefx): is it worth to use the O(1) queue optimization?
     }
 }
 
 void close_after_timeout(int/*fd*/, short/*flag*/, void* arg) {
     auto t_arg = reinterpret_cast<struct timer_arg*>(arg);
     close(t_arg->fd);
-    LOG3("#%d timed out and were closed.\n", t_arg->fd);
+    LOG3("#%d closed.\n", t_arg->fd);
     delete t_arg;
 }
 
@@ -193,23 +195,38 @@ int add_to_list(const struct event_base*, const struct event* evt, void* arg) {
 void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg) {
     auto t_arg = reinterpret_cast<struct timer_arg*>(arg);
     for (auto evt : *(t_arg->evt_list)) {
-        auto cb = event_get_callback(evt);
-        auto cb_arg = event_get_callback_arg(evt);
-        auto check_and_set = [](auto conn, auto evt) {
-            // check event exists, conn not slow mode and not transitioning
-            if (event_pending(evt, EV_READ | EV_WRITE, NULL) \
-                    && conn->is_fast_mode() && !conn->is_in_transition()) {
+        if (auto conn = get_associated_conn(evt)) {
+            if (event_pending(evt, EV_READ | EV_WRITE, NULL) /* event exists */ \
+                    && conn->is_fast_mode()          /* not slow-mode */ \
+                    && !conn->is_in_transition()) {  /* not transitioning */
                 conn->set_slow_mode();
             }
-        };
-        if (cb == Client::on_readable || cb == Client::on_writable) {
-            check_and_set(reinterpret_cast<Client*>(cb_arg)->conn, evt);
-        } else if (cb == Server::on_readable || cb == Server::on_writable) {
-            check_and_set(reinterpret_cast<Server*>(cb_arg)->conn, evt);
-        }  // else can be other things
+        }
     }
     delete t_arg->evt_list;
     delete t_arg;
+}
+
+void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
+    static vector<struct event*> evt_list;
+    static unordered_set<Connection*> conn_list;
+    evt_list.clear();
+    conn_list.clear();
+    // get unique connections
+    event_base_foreach_event(evt_base, add_to_list, &evt_list);
+    for (auto evt : evt_list) {
+        if (auto conn = get_associated_conn(evt)) conn_list.insert(conn);
+    }
+    // check transfer rate
+    for (auto conn : conn_list) {
+        const auto threshold = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
+        if (conn->client->recv_count < threshold) {
+            LOG1("[%s] Detected transfer rate <= threshold! (%lu)\n", \
+                 conn->client->c_addr(), conn->client->recv_count);
+            // conn->set_slow_mode();
+        }
+        conn->client->recv_count = 0;  // reset counter
+    }
 }
 
 int close_event_fd(const struct event_base*, const struct event* evt, void*) {
@@ -258,6 +275,9 @@ int main(int argc, char* argv[]) {
 
     // setup parser and signal handlers
     HttpParser::init_all_settings();
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        ERROR_EXIT("Cannot disable SIGPIPE");
+    }
     if (signal(SIGINT, break_event_loop) == SIG_ERR) {
         ERROR_EXIT("Cannot set SIGINT handler");
     }
@@ -265,10 +285,10 @@ int main(int argc, char* argv[]) {
         ERROR("Cannot set SIGUSR1 handler");
     }
 
-    // run event loop
     evt_base = event_base_new();
+    add_event_with_timeout(new_persist_timer(monitor_transfer_rate), MONITOR_INTERVAL);
     add_event(new_read_event(master_sock, Connection::accept_new));
-    if (event_base_dispatch(evt_base) < 0) {  // blocking
+    if (event_base_dispatch(evt_base) < 0) {  /* blocks here */
         ERROR_EXIT("Cannot dispatch event");
     }
     event_base_foreach_event(evt_base, close_event_fd, NULL);
