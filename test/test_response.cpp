@@ -6,14 +6,12 @@
 int child_pid = 0;
 
 
-void run_proxy();
-
 void setup() {
     // fork a child for running proxy
     if ((child_pid = fork()) < 0) {
         ERROR_EXIT("Cannot fork");
     } else if (child_pid == 0) {  // child
-        run_proxy();
+        run_proxy(PROXY_PORT, "localhost", SERVER_PORT);
         exit(0);
     } else {
         return;
@@ -27,78 +25,29 @@ void teardown() {
     if (waitpid(child_pid, &stat, 0) < 0) ERROR_EXIT("Waitpid error");
 }
 
-void run_proxy() {
-    Server::address = "localhost";
-    Server::port = SERVER_PORT;
-    unsigned short port = PROXY_PORT;
-
-    // occupy fds
-    raise_open_file_limit(MAX_FILE_DSC);
-    int master_sock = passive_TCP(port);  // fd should be 3
-    for (int i = 0; i < MAX_HYBRIDBUF; i++) {
-        free_hybridbuf.push(make_shared<Hybridbuf>("hist"));
-    }
-    assert(free_hybridbuf.back()->get_fd() == 3 + MAX_HYBRIDBUF);
-
-    // setup parser and signal handlers
-    HttpParser::init_all_settings();
-    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        ERROR_EXIT("Cannot disable SIGPIPE");
-    }    if (signal(SIGINT, break_event_loop) == SIG_ERR) {
-        ERROR_EXIT("Cannot set SIGINT handler");
-    }
-    if (signal(SIGUSR1, put_all_connection_slow_mode) == SIG_ERR) {
-        ERROR("Cannot set SIGUSR1 handler");
-    }
-    // run event loop
-    evt_base = event_base_new();
-    add_event(new_read_event(master_sock, Connection::accept_new));
-    if (event_base_dispatch(evt_base) < 0) {  // blocking
-        ERROR_EXIT("Cannot dispatch event");
-    }
-    event_base_foreach_event(evt_base, close_event_fd, NULL);
-    event_base_free(evt_base);
-}
-
 void proxy_set_all_slow_mode() {
     if (kill(child_pid, SIGUSR1) < 0) ERROR_EXIT("Kill error");
     sleep(3);  // 3 seconds should be enough (for timeout = 1s)
 }
 
-vector<Connection*> get_all_connections() {
-    vector<Connection*> all_conn;
-    vector<struct event*> evt_list;
-    event_base_foreach_event(evt_base, add_to_list, &evt_list);  // get events
-
-    for (auto evt : evt_list) {
-        auto cb = event_get_callback(evt);
-        auto cb_arg = event_get_callback_arg(evt);
-        auto append_unique = [=](auto conn) {
-            for (auto c : all_conn) if (c == conn) return;
-            all_conn.push_back(c);
-        };
-        if (cb == Client::on_readable || cb == Client::on_writable) {
-            append_unique(reinterpret_cast<Client*>(cb_arg)->conn);
-        } else if (cb == Server::on_readable || cb == Server::on_writable) {
-            append_unique(reinterpret_cast<Server*>(cb_arg)->conn);
-        }
-    }
-    return all_conn;
-}
-
-bool test_response_to_HEAD() {
-    BEGIN("Testing the response to HEAD...");
+/******************************************************************************
+ * - Client sends a HEAD request.
+ * - Server responses a bodiless msg with non-zero Content-Length header.
+ * - The proxy should recognize the response has completed.
+ ******************************************************************************/
+bool test_bodiless_HEAD_response() {
+    BEGIN();
     int client_sock = connect_TCP("localhost", PROXY_PORT);
     proxy_set_all_slow_mode();
-    auto all_conn = get_all_connections();
-    ASSERT_EQUAL(1, all_conn.size());  // only has one connection so far
+    auto conn_list = get_all_connections();
+    auto conn = conn_list[0];
+    ASSERT_EQUAL(1, conn_list.size());  // only has one connection so far
 
     int server_sock = passive_TCP(SERVER_PORT);  // prepare server
-    auto conn = all_conn[0];
     auto request = "HEAD / HTTP/1.1\r\n" \
         "Host: www.csie.ncu.edu.tw\r\nUser-Agent: curl\r\nAccept: */*\r\n\r\n";
     conn->parser->last_method = HTTP_HEAD - 1;  // set to a different value
-    write(client_sock, request, strlen(request));
+    write_with_assert(client_sock, request, strlen(request));
     sleep(1);
     ASSERT_EQUAL(HTTP_HEAD, conn->parser->last_method);  // msg should complete
 
@@ -109,24 +58,30 @@ bool test_response_to_HEAD() {
         "Connection: keep-alive\r\nLocation: https://www.csie.ncu.edu.tw/\r\n\r\n";
     auto dummy = "123";
     conn->parser->set_first_end_of_msg(dummy);  // set to a different value
-    write(sock, response, strlen(response));
+    write_with_assert(sock, response, strlen(response));
     sleep(1);
-    ASSERT_NOT_EQUAL(dummy, conn->parser->get_first_end_of_msg());  // msg should complete
+    // msg should complete
+    ASSERT_NOT_EQUAL(dummy, conn->parser->get_first_end_of_msg());
 
     END();
 }
 
-bool test_304_response() {
-    BEGIN("Testing 304 response...");
+/******************************************************************************
+ * - A 304 response should has no body, even though it may have non-zero
+ *   Content-Length header.
+ ******************************************************************************/
+bool test_bodiless_304_response() {
+    BEGIN();
     int client_sock = connect_TCP("localhost", PROXY_PORT);
     proxy_set_all_slow_mode();
-    auto all_conn = get_all_connections();
-    auto conn = all_conn[0];
+    auto conn_list = get_all_connections();
+    auto conn = conn_list[0];
+    ASSERT_EQUAL(1, conn_list.size());  // only has one connection so far
 
     int server_sock = passive_TCP(SERVER_PORT);  // prepare server
     auto request = "GET /~nickm/ HTTP/1.1\r\n" \
         "Host: www.wangafu.net\r\nIf-Modified-Since: Mon, 17 Oct 2016 21:10:05 GMT\r\n\r\n";
-    write(client_sock, request, strlen(request));
+    write_with_assert(client_sock, request, strlen(request));
     sleep(1);
     ASSERT_EQUAL(HTTP_GET, conn->parser->last_method);  // msg should complete
 
@@ -137,7 +92,7 @@ bool test_304_response() {
         "Connection: keep-alive\r\n\r\n";
     auto dummy = "123";
     conn->parser->set_first_end_of_msg(dummy);  // set to a different value
-    write(sock, response, strlen(response));
+    write_with_assert(sock, response, strlen(response));
     sleep(1);
     ASSERT_NOT_EQUAL(dummy, conn->parser->get_first_end_of_msg());  // msg should complete
 
@@ -146,26 +101,19 @@ bool test_304_response() {
 
 int main() {
     Test tests[] = {
-        test_response_to_HEAD,
-        test_304_response,
+        test_bodiless_HEAD_response,
+        test_bodiless_304_response,
     };
     int failed = 0;
     for (auto t : tests) {
         setup();
         if (!t()) {
             failed++;
-            printf("\n%18s^^ THIS TEST FAILED!! ^^%18s\n\n", DASH30, DASH30);
+            display_this_test_failed_msg();
         }
         teardown();
     }
-
-    printf("\n" DASH30 DASH30);
-    if (failed > 0) {
-        printf("%23s%d TEST FAILED!", "", failed);
-    } else {
-        printf("%24sALL TEST PASSED.\n", "");
-    }
-    printf(DASH30 DASH30 "\n\n");
+    display_tests_summary(failed);
 
     return 0;
 }

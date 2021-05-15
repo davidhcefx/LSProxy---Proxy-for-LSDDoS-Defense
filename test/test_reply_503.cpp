@@ -2,39 +2,35 @@
 
 
 bool test_reply_503() {
-    BEGIN("Testing reply_503_unavailable...");
+    BEGIN();
     const short port = 8099;
     int master_sock = passive_TCP(port);
     int client_sock = connect_TCP("localhost", port);
     int sock = accept_connection(master_sock);
     auto count = reply_with_503_unavailable(sock);
 
-    // check return size
+    // return size should be correct
     ASSERT_EQUAL(read_all(client_sock, global_buffer, count).nbytes, count);
-    // compare content
-    char local_buffer[sizeof(global_buffer)];
-    int file_fd = open("utils/503.html", O_RDONLY);
-    assert(file_fd > 0);
-    read_all(file_fd, local_buffer, count);
-    ASSERT_EQUAL(0, memcmp(global_buffer, local_buffer, count));
+    // check content length
+    global_buffer[count] = '\0';
+    string msg(global_buffer);
+    ASSERT_TRUE(check_content_length_matched(msg));
 
     END();
 }
 
 int main() {
+    Test tests[] = {
+        test_reply_503,
+    };
     int failed = 0;
-    if (!test_reply_503()) {
-        printf("\n%18s^^ THIS TEST FAILED!! ^^%18s\n\n", DASH30, DASH30);
-        failed++;
+    for (auto t : tests) {
+        if (!t()) {
+            failed++;
+            display_this_test_failed_msg();
+        }
     }
-
-    printf("\n" DASH30 DASH30);
-    if (failed > 0) {
-        printf("%23s%d TEST FAILED!", "", failed);
-    } else {
-        printf("%24sALL TEST PASSED.\n", "");
-    }
-    printf(DASH30 DASH30 "\n\n");
+    display_tests_summary(failed);
 
     return 0;
 }

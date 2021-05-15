@@ -2,9 +2,10 @@
 /*
  * ls_proxy.h should be adjusted first.
  */
-#define HIST_CACHE_SIZE     17   // less than total size of data
+#include "../src/llhttp/llhttp.h"
+#define HIST_CACHE_SIZE     20   // less than total size of data
 #define MAX_HYBRID_SIZE     HIST_CACHE_SIZE
-#define SOCK_IO_BUF_SIZE    150  // more than twice total size of data
+#define SOCK_IO_BUF_SIZE    200  // more than twice total size of data
 #define MAX_CIRCULAR_SIZE   SOCK_IO_BUF_SIZE
 
 
@@ -13,16 +14,16 @@ Hybridbuf* hybridbuf = NULL;
 Circularbuf* circularbuf = NULL;
 vector<Filebuf*> filebuf_tmp;  // to be recycled Filebufs
 vector<string> data = {
-    "hello",
-    "worldworldworldworldworldworldworldworld",
-    "_-!",
-    "\n \x01\x00\xde\xad\xbe\xef\x80\t\r\n."
+    "hello",  /* 5 */
+    "worldworld worldwor ldworldwo rldworldw orld",  /* 44 */
+    "!?/\\)(><}{\"'@#$%^&*_-+!:;.`~|\r\n\t\n",       /* 33 */
+    {'\0', '\1', '\xca', '\xfe', '\xba', '\xbe'},    /* 6 */
 };
 
 
 void setup() {
-    filebuf = new Filebuf();
-    hybridbuf = new Hybridbuf();
+    filebuf = new Filebuf("filebuf");
+    hybridbuf = new Hybridbuf("hybridbuf");
     circularbuf = new Circularbuf();
 }
 
@@ -35,8 +36,8 @@ void teardown() {
     }
 }
 
-bool test_file_nonblocking() {
-    BEGIN("Testing file nonblocking...");
+bool test_filebuf_nonblocking() {
+    BEGIN();
     int fd = filebuf->get_fd();
     while (read(fd, global_buffer, sizeof(global_buffer)) > 0) {}
     END();
@@ -71,8 +72,8 @@ bool _rw_helper(Filebuf* buf) {
     return true;
 }
 
-bool test_file_rw() {
-    BEGIN("Testing file r/w...");
+bool test_filebuf_rw() {
+    BEGIN();
     ASSERT_TRUE(_rw_helper(filebuf));
     END();
 }
@@ -92,21 +93,21 @@ bool _clear_helper(Filebuf* buf) {
     return true;
 }
 
-bool test_file_clear() {
-    BEGIN("Testing file clear...");
+bool test_filebuf_clear() {
+    BEGIN();
     ASSERT_TRUE(_clear_helper(filebuf));
     END();
 }
 
-bool test_hybrid_rw() {
-    BEGIN("Testing hybridbuf r/w...");
+bool test_hybridbuf_rw() {
+    BEGIN();
     // overflow to file when memory is full, but the result should be correct
     ASSERT_TRUE(_rw_helper(hybridbuf));
-    END();   
+    END();
 }
 
-bool test_hybrid_clear() {
-    BEGIN("Testing hybridfile clear...");
+bool test_hybridbuf_clear() {
+    BEGIN();
     ASSERT_TRUE(_clear_helper(hybridbuf));
     END();
 }
@@ -132,8 +133,8 @@ int _create_nonempty_fd_helper(size_t min_size = 1) {
     return fb->get_fd();
 }
 
-bool test_circular_r() {
-    BEGIN("Testing circularbuf read...");
+bool test_circularbuf_r() {
+    BEGIN();
     int fd = _create_nonempty_fd_helper();
     auto fbuf = filebuf_tmp.back();
     auto stat = circularbuf->read_all_from(fd);
@@ -150,9 +151,9 @@ bool test_circular_r() {
     END();
 }
 
-bool test_circular_overflow() {
-    BEGIN("Testing circularbuf overflow...");
-    int fd = _create_nonempty_fd_helper(MAX_CIRCULAR_SIZE);    
+bool test_circularbuf_overflow() {
+    BEGIN();
+    int fd = _create_nonempty_fd_helper(MAX_CIRCULAR_SIZE);
     auto stat = circularbuf->read_all_from(fd);
 
     // should not reach eof
@@ -168,8 +169,8 @@ bool test_circular_overflow() {
     END();
 }
 
-bool test_circular_w() {
-    BEGIN("Testing circularbuf write...");
+bool test_circularbuf_w() {
+    BEGIN();
     // fill buffer
     int fd = _create_nonempty_fd_helper(MAX_CIRCULAR_SIZE);
     auto fbuf = filebuf_tmp.back();
@@ -191,32 +192,25 @@ bool test_circular_w() {
 
 int main() {
     Test tests[] = {
-        test_file_nonblocking,
-        test_file_rw,
-        test_file_clear,
-        test_hybrid_rw,
-        test_hybrid_clear,
-        test_circular_r,
-        test_circular_overflow,
-        test_circular_w,
+        test_filebuf_nonblocking,
+        test_filebuf_rw,
+        test_filebuf_clear,
+        test_hybridbuf_rw,
+        test_hybridbuf_clear,
+        test_circularbuf_r,
+        test_circularbuf_overflow,
+        test_circularbuf_w,
     };
     int failed = 0;
     for (auto t : tests) {
         setup();
         if (!t()) {
             failed++;
-            printf("\n%18s^^ THIS TEST FAILED!! ^^%18s\n\n", DASH30, DASH30);
+            display_this_test_failed_msg();
         }
         teardown();
     }
-
-    printf("\n" DASH30 DASH30);
-    if (failed > 0) {
-        printf("%23s%d TEST FAILED!", "", failed);
-    } else {
-        printf("%24sALL TEST PASSED.\n", "");
-    }
-    printf(DASH30 DASH30 "\n\n");
+    display_tests_summary(failed);
 
     return 0;
 }
