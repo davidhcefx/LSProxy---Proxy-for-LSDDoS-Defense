@@ -19,11 +19,11 @@ Server::Server(Connection* _conn): conn{_conn}, queued_output{NULL} {
 Server::~Server() {
     LOG2("[%15s] Connection closed (#%d) (active: %u)\n", "SERVER", get_fd(), \
          --Server::connection_count);
-    close_socket_gracefully(get_fd());
     del_event(read_evt);
     del_event(write_evt);
     free_event(read_evt);
     free_event(write_evt);
+    close_socket_gracefully(get_fd());
     if (queued_output) delete queued_output;
 }
 

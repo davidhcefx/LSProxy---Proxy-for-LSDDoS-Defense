@@ -14,11 +14,11 @@ Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
 
 Client::~Client() {
     LOG1("[%s] Connection closed.\n", c_addr());
-    close_socket_gracefully(get_fd());   // TODO: cannot call del_event after this?
-    del_event(read_evt);
+    del_event(read_evt);  // should be called before closing fd
     del_event(write_evt);
     free_event(read_evt);
     free_event(write_evt);
+    close_socket_gracefully(get_fd());
     free_hybridbuf.push(request_history);
     if (queued_output) delete queued_output;
     if (request_buf) delete request_buf;

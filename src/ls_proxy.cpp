@@ -5,7 +5,7 @@ struct event_base* evt_base;
 char global_buffer[SOCK_IO_BUF_SIZE];  // buffer for each read operation
 queue<shared_ptr<Hybridbuf>> free_hybridbuf;
 /* class variables */
-char* Server::address;
+const char* Server::address;
 unsigned short Server::port;
 unsigned Server::connection_count = 0;
 llhttp_settings_t HttpParser::request_settings;
@@ -221,7 +221,7 @@ void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
     for (auto conn : conn_list) {
         const auto threshold = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
         if (conn->client->recv_count < threshold) {
-            LOG1("[%s] Detected transfer rate <= threshold! (%lu)\n", \
+            LOG1("[%s] Detected transfer rate < threshold! (%lu)\n", \
                  conn->client->c_addr(), conn->client->recv_count);
             // conn->set_slow_mode();
         }

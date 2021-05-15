@@ -58,7 +58,7 @@
 #define ERROR(fmt, ...)   \
     { fprintf(stderr, "[Error] " fmt ": %s (%s:%d)\n" __VA_OPT__(,) \
               __VA_ARGS__, strerror(errno), __FILE__, __LINE__); }
-#define ERROR_EXIT(...)   { ERROR(__VA_ARGS__); exit(1); }
+#define ERROR_EXIT(...)   { ERROR(__VA_ARGS__); abort(); }
 using std::string;
 using std::to_string;
 using std::shared_ptr;
@@ -362,7 +362,7 @@ class Client {
 /* class for handling server io */
 class Server {
  public:
-    static char* address;              // the server to be protected
+    static const char* address;        // the server to be protected
     static unsigned short port;        // the server to be protected
     static unsigned connection_count;  // number of active connections
     struct event* read_evt;   // both events have ptr keeping track of *this
@@ -517,7 +517,7 @@ inline struct event* new_persist_timer(event_callback_fn cb, void* arg = NULL) {
 
 inline void add_event(struct event* evt, const struct timeval* timeout) {
     if (event_add(evt, timeout) < 0) { [[unlikely]]
-        ERROR_EXIT("Cannot add event");
+        WARNING("event_add failed: %s", strerror(errno));
     }
 }
 
@@ -529,7 +529,7 @@ inline void add_event_with_timeout(struct event* evt, int seconds) {
 
 inline void del_event(struct event* evt) {
     if (event_del(evt) < 0) { [[unlikely]]
-        ERROR_EXIT("Cannot del event");
+        WARNING("event_del failed: %s", strerror(errno));
     }
 }
 
