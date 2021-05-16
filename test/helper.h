@@ -1,29 +1,55 @@
 #ifndef TEST_HELPER_H_
 #define TEST_HELPER_H_
+#include <sys/wait.h>
+#include <iostream>
+#include <sstream>
 #include "ls_proxy.h"
+using std::cin;
+using std::cout;
+using std::endl;
+using std::stringstream;
 #define DASH30      "=============================="
+#define PIPE_R      0
+#define PIPE_W      1
 /* put the following at the start and the end of each test */
 #define BEGIN()     printf("[Running %s]\n", __func__)
 #define END()       LOG2("----------Done----------\n"); return true;
-#define USE_RET_FALSE_AS_ASSERT
-#ifdef  USE_RET_FALSE_AS_ASSERT
-#define ASSERT_TRUE(cond)   if (!(cond)) return false;
+// #define RETURN_FALSE_AS_ASSERT
+#ifdef  RETURN_FALSE_AS_ASSERT
+#define ASSERT(op, var1, var2)  { if (!((var1) op (var2))) return false; }
 #else
-#define ASSERT_TRUE(cond)   assert(cond);
-#endif  // USE_RET_FALSE_AS_ASSERT
-#define ASSERT_EQUAL(expect, actual)       ASSERT_TRUE(expect == actual)
-#define ASSERT_NOT_EQUAL(nexpect, actual)  ASSERT_TRUE(nexpect != actual)
+#define ASSERT(op, var1, var2)  \
+    { auto v1 = var1, v2 = var2; \
+      if (!((v1) op (v2))) { \
+        cout << v1 << endl << v2 << endl; \
+        teardown(); \
+        assert((v1) op (v2)); \
+      } }
+#endif  // RETURN_FALSE_AS_ASSERT
+#define ASSERT_EQUAL(expect, actual)       ASSERT(==, expect, actual)
+#define ASSERT_NOT_EQUAL(nexpect, actual)  ASSERT(!=, nexpect, actual)
+#define ASSERT_GT(actual, ref)             ASSERT(>, actual, ref)
+#define ASSERT_LT(actual, ref)             ASSERT(<, actual, ref)
+#define ASSERT_TRUE(actual)                ASSERT_EQUAL(true, actual)
+#define ASSERT_FALSE(actual)               ASSERT_EQUAL(false, actual)
 
+
+// pipes for forked proxy
+extern int parent_inbox[2];
+extern int child_inbox[2];
 
 // type of tests
 typedef bool (*Test)();
 
 
-void display_this_test_failed_msg() {
+void setup();
+void teardown();
+
+inline void display_this_test_failed_msg() {
     printf("\n%18.18s^^ THIS TEST FAILED!! ^^%18.18s\n\n", DASH30, DASH30);
 }
 
-void display_tests_summary(int fails) {
+inline void display_tests_summary(int fails) {
     printf(DASH30 DASH30 "\n");
 
     if (fails > 0) {
@@ -34,97 +60,115 @@ void display_tests_summary(int fails) {
     printf(DASH30 DASH30 "\n\n");
 }
 
-void write_with_assert(int fd, const char* buffer, size_t size) {
+// assert written size matched
+inline void write_with_assert(int fd, const char* buffer, size_t size) {
     auto stat = write_all(fd, buffer, size);
     assert(size == stat.nbytes);
 }
 
-// return accepted sock fd
-int accept_connection(int master_sock) {
+// fd should be nonblocking
+inline char getchar_with_timeout(int fd, int seconds) {
+    char buf[1];
+    if (read(fd, buf, 1) < 0) {
+        sleep(seconds);
+        if (read(fd, buf, 1) > 0) {
+            return buf[0];
+        }
+    }
+    return '\0';
+}
+
+inline void read_until(char delim, int fd, char* buf, size_t max_size) {
+    while (true) {
+        if (auto count = read(fd, buf, max_size); count > 0) {
+            buf[count] = '\0';
+            if (strchr(buf, delim) != NULL) break;
+            buf += count;  // move ptr
+            max_size -= count;
+        } else if (count < 0 && errno == EAGAIN) {
+            // do nothing
+        } else {
+            break;
+        }
+    }
+}
+
+// return accepted socket fd
+inline int accept_connection(int master_sock) {
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
     int sock = accept(master_sock, (struct sockaddr*)&addr, &addr_len);
-    if (evutil_make_socket_nonblocking(sock) < 0) { [[unlikely]]
+    if (evutil_make_socket_nonblocking(sock) < 0) {
         ERROR_EXIT("Cannot make socket nonblocking");
     }
     return sock;
 }
 
-// get all unique connections
-vector<Connection*> get_all_connections() {
-    vector<Connection*> conn_list;
-    vector<struct event*> evt_list;
-    event_base_foreach_event(evt_base, add_to_list, &evt_list);  // get events
-
-    for (auto evt : evt_list) {
-        if (auto conn = get_associated_conn(evt)) {
-            [&](auto conn) {  // append if not exist
-                for (auto c : conn_list) if (c == conn) return;
-                conn_list.push_back(conn);
-            } (conn);
-        }
-    }
-    return conn_list;
-}
-
-// run proxy and block execution
-void run_proxy(short port, const char* server_addr, short server_port) {
-    Server::address = server_addr;
-    Server::port = server_port;
-
-    // occupy fds
-    raise_open_file_limit(MAX_FILE_DSC);
-    int master_sock = passive_TCP(port);  // fd should be 3
-    for (int i = 0; i < MAX_HYBRIDBUF; i++) {
-        free_hybridbuf.push(make_shared<Hybridbuf>("hist"));
-    }
-    assert(free_hybridbuf.back()->get_fd() == 3 + MAX_HYBRIDBUF);
-
-    // setup parser and signal handlers
-    HttpParser::init_all_settings();
-    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        ERROR_EXIT("Cannot disable SIGPIPE");
-    }    if (signal(SIGINT, break_event_loop) == SIG_ERR) {
-        ERROR_EXIT("Cannot set SIGINT handler");
-    }
-    if (signal(SIGUSR1, put_all_connection_slow_mode) == SIG_ERR) {
-        ERROR("Cannot set SIGUSR1 handler");
-    }
-    // run event loop
-    evt_base = event_base_new();
-    add_event(new_read_event(master_sock, Connection::accept_new));
-    if (event_base_dispatch(evt_base) < 0) {  // blocking
-        ERROR_EXIT("Cannot dispatch event");
-    }
-    event_base_foreach_event(evt_base, close_event_fd, NULL);
-    event_base_free(evt_base);
-}
-
-// compare if the data within the two fd are the same
-bool compare_fd_helper(int fd1, int fd2) {
+// compare if the data are identical, for min(len(fd1), len(fd2)) bytes
+inline bool compare_fd_helper(int fd1, int fd2) {
     char local_buffer[sizeof(global_buffer)];
     int n1 = read_all(fd1, global_buffer, sizeof(global_buffer)).nbytes;
     int n2 = read_all(fd2, local_buffer, sizeof(local_buffer)).nbytes;
-    ASSERT_EQUAL(n1, n2);
-    ASSERT_EQUAL(0, memcmp(global_buffer, local_buffer, n1));
+    ASSERT_EQUAL(0, memcmp(global_buffer, local_buffer, min(n1, n2)));
     return true;
 }
 
-// assuming msg contained a "Content-Length:" header
-bool check_content_length_matched(const string& msg) {
+inline int make_fd_nonblocking(int fd) {
+    int flags = fcntl(fd, F_GETFL, 0);
+    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+// check if msg has a "Content-Length:" header and its value is correct
+inline bool check_content_length_matched(const string& msg) {
     const char* header = "\r\nContent-Length:";
     const char* crlfcrlf = "\r\n\r\n";
 
     size_t idx = msg.find(header);
-    ASSERT_TRUE(idx > 0);
+    ASSERT_NOT_EQUAL(string::npos, idx);
     idx += strlen(header);
     size_t length = atoi(msg.c_str() + idx);
 
     idx = msg.find(crlfcrlf, idx);
-    ASSERT_TRUE(idx > 0);
+    ASSERT_NOT_EQUAL(string::npos, idx);
     idx += strlen(crlfcrlf);
     ASSERT_EQUAL(length, msg.size() - idx);
     return true;
+}
+
+inline void send_SIGINT_to(int pid) {
+    if (kill(pid, SIGINT) < 0) ERROR_EXIT("Send SIGINT error");
+}
+
+inline void send_SIGUSR1_to(int pid) {
+    if (kill(pid, SIGUSR1) < 0) ERROR_EXIT("Send SIGUSR1 error");
+}
+
+inline void send_SIGUSR2_to(int pid) {
+    if (kill(pid, SIGUSR2) < 0) ERROR_EXIT("Send SIGUSR2 error");
+}
+
+// run proxy and block execution
+void run_proxy(unsigned short port, const char* server_addr, \
+               unsigned short server_port);
+
+bool execute_command(string command);
+
+// return firstly encountered Connection ptr or NULL
+inline Connection* get_first_connection() {
+    vector<struct event*> evt_list;
+    event_base_foreach_event(evt_base, add_to_list, &evt_list);
+    for (auto evt : evt_list) {
+        if (auto conn = get_associated_conn(evt)) return conn;
+    }
+    return NULL;
+}
+
+inline uint8_t method_to_uint8(const string& method) {
+    if (method == "HEAD") return HTTP_HEAD;
+    if (method == "GET") return HTTP_GET;
+    if (method == "POST") return HTTP_POST;
+    if (method == "PUT") return HTTP_PUT;
+    return 0;
 }
 
 #endif  // TEST_HELPER_H_

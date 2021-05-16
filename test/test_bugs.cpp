@@ -4,45 +4,57 @@
 
 
 int child_pid = 0;
-
+int status;
 
 void setup() {
-    // fork a child for running proxy
+    /* fork a child for running proxy */
+    if (pipe(parent_inbox) < 0) ERROR_EXIT("Cannot create pipe");
+    if (pipe(child_inbox) < 0) ERROR_EXIT("Cannot create pipe");
+    make_fd_nonblocking(parent_inbox[PIPE_R]);
+
     if ((child_pid = fork()) < 0) {
         ERROR_EXIT("Cannot fork");
     } else if (child_pid == 0) {  // child
+        close(parent_inbox[PIPE_R]);
+        close(child_inbox[PIPE_W]);
         run_proxy(PROXY_PORT, "localhost", SERVER_PORT);
         exit(0);
     } else {
-        return;
+        close(child_inbox[PIPE_R]);
+        close(parent_inbox[PIPE_W]);
+        sleep(5);  // wait for startup to complete
     }
 }
 
 void teardown() {
-    // terminate proxy
-    int stat;
-    if (kill(child_pid, SIGINT) < 0) ERROR_EXIT("Kill error");
-    if (waitpid(child_pid, &stat, 0) < 0) ERROR_EXIT("Waitpid error");
+    close(parent_inbox[PIPE_R]);
+    close(child_inbox[PIPE_W]);
+    send_SIGINT_to(child_pid);
+    if (waitpid(child_pid, &status, 0) < 0) ERROR_EXIT("Waitpid error");
 }
 
-void send_SIGUSR1() {
-    if (kill(child_pid, SIGUSR1) < 0) ERROR_EXIT("Kill error");
-}
-
-// return child pid
+// fork a process and return its pid
 int send_SIGUSR1_background(int milisec) {
-    int pid = 0;
-    if ((pid = fork()) < 0) {
+    if (int pid = fork(); pid < 0) {
         ERROR_EXIT("Cannot fork");
     } else if (pid == 0) {
         while (true) {
-            send_SIGUSR1();
+            send_SIGUSR1_to(child_pid);
             usleep(milisec * 1000);
         }
         exit(0);
     } else {
-        return;
+        return pid;
     }
+}
+
+void proxy_run(string command) {
+    command += ";";
+    write_with_assert(child_inbox[PIPE_W], command.c_str(), command.size());
+    send_SIGUSR2_to(child_pid);  // trigger command
+    sleep(1);
+    char res = getchar_with_timeout(parent_inbox[PIPE_R], 5);
+    ASSERT_EQUAL('O', res);
 }
 
 /*********************************************************
@@ -57,7 +69,7 @@ bool test_close_with_rst_instead_of_fin() {
     int client_sock = connect_TCP("localhost", PROXY_PORT);
     auto request = "GET / HTTP/1.1\r\n\r\n";
     write_with_assert(client_sock, request, strlen(request));
-    sleep(1);
+    sleep(2);
 
     // get 503 response
     auto stat = read_all(client_sock, global_buffer, sizeof(global_buffer));
@@ -78,16 +90,11 @@ bool test_close_with_rst_instead_of_fin() {
 bool test_signal_not_handled_correctly() {
     BEGIN();
     int client_sock = connect_TCP("localhost", PROXY_PORT);
-    auto conn_list = get_all_connections();
-    auto conn = conn_list[0];
-    ASSERT_EQUAL(1, conn_list.size());  // only has one connection so far
 
-    send_SIGUSR1();
-    ASSERT_EQUAL(false, conn->is_in_transition());  // not fired yet
+    send_SIGUSR1_to(child_pid);
     close(client_sock);
-    sleep(5);
-    // not crashed
-    ASSERT_TRUE(event_base_get_num_events(evt_base, EV_READ | EV_WRITE) > 0);
+    sleep(15);  // wait for callback to trigger
+    proxy_run("ASSERT_proxy_alive");
 
     END();
 }
@@ -101,11 +108,10 @@ bool test_signal_not_handled_correctly() {
 bool test_sigpipe_error() {
     BEGIN();
     int client_sock = connect_TCP("localhost", PROXY_PORT);
-    sleep(1);
+
     close(client_sock);
     sleep(5);
-    // not crashed
-    ASSERT_TRUE(event_base_get_num_events(evt_base, EV_READ | EV_WRITE) > 0);
+    proxy_run("ASSERT_proxy_alive");
 
     END();
 }
@@ -122,31 +128,31 @@ bool test_event_del_failure() {
     int pid = send_SIGUSR1_background(100);
     int client_sock = connect_TCP("localhost", PROXY_PORT);
     int server_sock = passive_TCP(SERVER_PORT);  // prepare server
-    auto conn_list = get_all_connections();
-    auto conn = conn_list[0];
-    ASSERT_EQUAL(1, conn_list.size());  // only has one connection so far
+    proxy_run("save_a_connection");  // keep track this connection
 
     auto request = "GET / HTTP/1.1\r\n\r\n";
     write_with_assert(client_sock, request, strlen(request));
-    sleep(1);
-    ASSERT_EQUAL(false, conn->is_fast_mode());  // now client is in slow-mode
+    sleep(2);
+    proxy_run("ASSERT_not_fast_mode");  // now client is in slow-mode
     close(client_sock);
 
     int sock = accept_connection(server_sock);
     auto response = "\n\n";
     write_with_assert(sock, response, strlen(response));
-    sleep(1);
+    sleep(2);
     close(sock);
-    sleep(3);
-    // not crashed
-    ASSERT_TRUE(event_base_get_num_events(evt_base, EV_READ | EV_WRITE) > 0);
+    sleep(5);
+    proxy_run("ASSERT_proxy_alive");
 
-    if (kill(pid, SIGINT) < 0) ERROR_EXIT("Kill error");
-    if (waitpid(pid, &stat, 0) < 0) ERROR_EXIT("Waitpid error");
+    send_SIGINT_to(pid);
+    if (waitpid(pid, &status, 0) < 0) ERROR_EXIT("Waitpid error");
     END();
 }
 
 int main() {
+    if (signal(SIGPIPE, [](int){abort();}) == SIG_ERR) {
+        ERROR_EXIT("Cannot setup SIGPIPE handler");
+    }
     Test tests[] = {
         test_close_with_rst_instead_of_fin,
         test_signal_not_handled_correctly,

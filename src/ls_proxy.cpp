@@ -123,7 +123,7 @@ void close_after_timeout(int/*fd*/, short/*flag*/, void* arg) {
     delete t_arg;
 }
 
-int passive_TCP(unsigned short port, int qlen) {
+int passive_TCP(unsigned short port, bool reuse, int qlen) {
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons(port),
@@ -134,6 +134,9 @@ int passive_TCP(unsigned short port, int qlen) {
 
     if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot create socket");
+    }
+    if (reuse && evutil_make_listen_socket_reuseable_port(sockFd) < 0) { [[unlikely]]
+        ERROR_EXIT("Cannot set socket port reusable");
     }
     if (bind(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot bind to port %d", port);
@@ -250,6 +253,8 @@ int message_complete_cb(llhttp_t* parser, const char* at, size_t/*len*/) {
     }
     h_parser->set_last_end_of_msg(at);
     h_parser->last_method = parser->method;  // update
+    // TODO(davidhcefx): change to some public api instead of accessing method
+    //                   or status_code directly.
     return 0;
 }
 

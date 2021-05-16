@@ -54,7 +54,10 @@ libevent:
 raise_limit:
 	./utils/raise_nofile_limit.sh
 
+test:
+	make -C test all
+
 clean:
 	rm -f simple_attack ls_proxy
 
-.PHONY: all clean raise_limit gnu++2a libevent
+.PHONY: all test clean raise_limit gnu++2a libevent

@@ -5,8 +5,8 @@
 #include "../src/llhttp/llhttp.h"
 #define HIST_CACHE_SIZE     20   // less than total size of data
 #define MAX_HYBRID_SIZE     HIST_CACHE_SIZE
-#define SOCK_IO_BUF_SIZE    200  // more than twice total size of data
-#define MAX_CIRCULAR_SIZE   SOCK_IO_BUF_SIZE
+#define SOCK_IO_BUF_SIZE    500  // more than total size of data; at least 380
+#define MAX_CIRCULAR_SIZE   SOCK_IO_BUF_SIZE - 1  // max storable size
 
 
 Filebuf* filebuf = NULL;
@@ -34,6 +34,7 @@ void teardown() {
     for (auto fb : filebuf_tmp) {
         delete fb;
     }
+    filebuf_tmp.clear();
 }
 
 bool test_filebuf_nonblocking() {
@@ -82,14 +83,14 @@ bool _clear_helper(Filebuf* buf) {
     // first time
     buf->store(data[0].c_str(), data[0].size());
     buf->clear();
-    ASSERT_EQUAL(0, buf->data_size);
-    ASSERT_EQUAL(0, buf->fetch(global_buffer, sizeof(global_buffer)));
+    ASSERT_EQUAL(0, (int)buf->data_size);
+    ASSERT_EQUAL(0, (int)buf->fetch(global_buffer, sizeof(global_buffer)));
 
     // second time
     buf->store(data[1].c_str(), data[1].size());
     buf->clear();
-    ASSERT_EQUAL(0, buf->data_size);
-    ASSERT_EQUAL(0, buf->fetch(global_buffer, sizeof(global_buffer)));
+    ASSERT_EQUAL(0, (int)buf->data_size);
+    ASSERT_EQUAL(0, (int)buf->fetch(global_buffer, sizeof(global_buffer)));
     return true;
 }
 
@@ -128,7 +129,7 @@ int _create_nonempty_fd_helper(size_t min_size = 1) {
             fb->store(d.c_str(), d.size());
         }
     }
-    ASSERT_TRUE(fb->data_size > min_size);
+    ASSERT_GT(fb->data_size, min_size);
     fb->rewind();
     return fb->get_fd();
 }
@@ -140,13 +141,13 @@ bool test_circularbuf_r() {
     auto stat = circularbuf->read_all_from(fd);
 
     // should reach file's eof
-    ASSERT_EQUAL(true, stat.has_eof);
+    ASSERT_TRUE(stat.has_eof);
     ASSERT_EQUAL(fbuf->data_size, stat.nbytes);
     // check for size/space functions
     auto space = circularbuf->remaining_space();
     auto size = circularbuf->data_size();
     ASSERT_EQUAL(stat.nbytes, size);
-    ASSERT_EQUAL(MAX_CIRCULAR_SIZE, size + space);
+    ASSERT_EQUAL((size_t)MAX_CIRCULAR_SIZE, size + space);
 
     END();
 }
@@ -157,14 +158,14 @@ bool test_circularbuf_overflow() {
     auto stat = circularbuf->read_all_from(fd);
 
     // should not reach eof
-    ASSERT_EQUAL(false, stat.has_eof);
-    // should not overflow (last byte don't store data)
-    ASSERT_TRUE(circularbuf->data_size() < MAX_CIRCULAR_SIZE);
+    ASSERT_FALSE(stat.has_eof);
+    // should not overflow
+    ASSERT_LT(circularbuf->data_size(), (size_t)MAX_CIRCULAR_SIZE + 1);
     // check for size/space functions
     auto space = circularbuf->remaining_space();
     auto size = circularbuf->data_size();
     ASSERT_EQUAL(stat.nbytes, size);
-    ASSERT_EQUAL(MAX_CIRCULAR_SIZE, size + space);
+    ASSERT_EQUAL((size_t)MAX_CIRCULAR_SIZE, size + space);
 
     END();
 }
@@ -175,14 +176,17 @@ bool test_circularbuf_w() {
     int fd = _create_nonempty_fd_helper(MAX_CIRCULAR_SIZE);
     auto fbuf = filebuf_tmp.back();
     auto stat = circularbuf->read_all_from(fd);
+    ASSERT_EQUAL(0, (int)circularbuf->remaining_space());  // should be full
+    auto data_size = circularbuf->data_size();
+
     // write out
     int fd_out = _create_empty_fd_helper();
     auto fbuf_out = filebuf_tmp.back();
     stat = circularbuf->write_all_to(fd_out);
+    ASSERT_EQUAL(0, (int)circularbuf->data_size());  // should be empty
+    ASSERT_EQUAL(data_size, stat.nbytes);            // size should match
 
-    // buffer should be empty
-    ASSERT_EQUAL(0, circularbuf->data_size());
-    // compare
+    // compare content
     fbuf->rewind();
     fbuf_out->rewind();
     ASSERT_TRUE(compare_fd_helper(fbuf->get_fd(), fbuf_out->get_fd()));
@@ -191,6 +195,9 @@ bool test_circularbuf_w() {
 }
 
 int main() {
+    if (signal(SIGPIPE, [](int){abort();}) == SIG_ERR) {
+        ERROR_EXIT("Cannot setup SIGPIPE handler");
+    }
     Test tests[] = {
         test_filebuf_nonblocking,
         test_filebuf_rw,

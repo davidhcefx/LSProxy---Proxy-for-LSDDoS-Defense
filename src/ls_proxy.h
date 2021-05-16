@@ -266,7 +266,7 @@ class HttpParser {
  public:
     static llhttp_settings_t request_settings;  // callback settings
     static llhttp_settings_t response_settings;
-    int8_t last_method;  // last request method
+    uint8_t last_method;  // last request method
 
     HttpParser():
         last_method{0}, parser{new llhttp_t}, first_eom{NULL}, last_eom{NULL}
@@ -455,7 +455,7 @@ void close_socket_gracefully(int fd);
 // timer callback
 void close_after_timeout(int/*fd*/, short/*flag*/, void* arg);
 // return master socket Fd
-int passive_TCP(unsigned short port, int qlen = 128);
+int passive_TCP(unsigned short port, bool reuse = false, int qlen = 128);
 // return socket Fd; host can be either hostname or IP address
 int connect_TCP(const char* host, unsigned short port);
 // break event_base loop on signal

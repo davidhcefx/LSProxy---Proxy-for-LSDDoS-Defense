@@ -1,11 +1,11 @@
 #include "helper.h"
+#define PORT  8099
 
 
 bool test_reply_503() {
     BEGIN();
-    const short port = 8099;
-    int master_sock = passive_TCP(port);
-    int client_sock = connect_TCP("localhost", port);
+    int master_sock = passive_TCP(PORT);
+    int client_sock = connect_TCP("localhost", PORT);
     int sock = accept_connection(master_sock);
     auto count = reply_with_503_unavailable(sock);
 
@@ -20,6 +20,9 @@ bool test_reply_503() {
 }
 
 int main() {
+    if (signal(SIGPIPE, [](int){abort();}) == SIG_ERR) {
+        ERROR_EXIT("Cannot setup SIGPIPE handler");
+    }
     Test tests[] = {
         test_reply_503,
     };
