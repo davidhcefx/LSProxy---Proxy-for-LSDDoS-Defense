@@ -8,12 +8,15 @@ using std::cin;
 using std::cout;
 using std::endl;
 using std::stringstream;
+#define SERVER_PORT  8787
+#define PROXY_PORT   8099
 #define DASH30      "=============================="
+#define DASH10      "=========="
 #define PIPE_R      0
 #define PIPE_W      1
 /* put the following at the start and the end of each test */
-#define BEGIN()     printf("[Running %s]\n", __func__)
-#define END()       LOG2("----------Done----------\n"); return true;
+#define BEGIN()     LOG1("\n[" DASH10 " Running %s " DASH10 "]\n", __func__);
+#define END()       LOG1("----------Done----------\n"); return true;
 // #define RETURN_FALSE_AS_ASSERT
 #ifdef  RETURN_FALSE_AS_ASSERT
 #define ASSERT(op, var1, var2)  { if (!((var1) op (var2))) return false; }
@@ -68,14 +71,12 @@ inline void write_with_assert(int fd, const char* buffer, size_t size) {
 
 // fd should be nonblocking
 inline char getchar_with_timeout(int fd, int seconds) {
-    char buf[1];
+    char buf[1] = {'_'};
     if (read(fd, buf, 1) < 0) {
         sleep(seconds);
-        if (read(fd, buf, 1) > 0) {
-            return buf[0];
-        }
+        (void)read(fd, buf, 1);
     }
-    return '\0';
+    return buf[0];
 }
 
 inline void read_until(char delim, int fd, char* buf, size_t max_size) {

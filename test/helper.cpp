@@ -9,6 +9,7 @@ int child_inbox[2];
 void run_command_from_parent(int/*sig*/) {
     char command[1024];
     read_until(';', child_inbox[PIPE_R], command, sizeof(command));
+    LOG1("%s\n", command);
     auto result = execute_command(command) ? "O" : "X";
     write_with_assert(parent_inbox[PIPE_W], result, 1);
 }

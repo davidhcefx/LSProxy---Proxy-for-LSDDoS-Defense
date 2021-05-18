@@ -27,6 +27,7 @@ Server::~Server() {
     if (queued_output) delete queued_output;
 }
 
+// TODO: why received zero twice in test_bugs last testcase?
 void Server::recv_to_buffer_slowly(int fd) {
     auto client = conn->client;
     auto stat = read_all(fd, global_buffer, sizeof(global_buffer));

@@ -58,6 +58,6 @@ test:
 	make -C test all
 
 clean:
-	rm -f simple_attack ls_proxy
+	rm -f simple_attack ls_proxy core*
 
 .PHONY: all test clean raise_limit gnu++2a libevent

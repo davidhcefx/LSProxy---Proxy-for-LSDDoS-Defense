@@ -40,7 +40,7 @@ ls_proxy.h: test_buffer.cpp
 	replace_line '^#define SOCK_IO_BUF_SIZE.*'
 
 clean:
-	rm -f ls_proxy.h $(SRC) *.o $(TEST) core.*
+	rm -f ls_proxy.h $(SRC) *.o $(TEST) core*
 
 .PHONY: all clean
 .PRECIOUS: %.o

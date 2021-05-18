@@ -195,9 +195,6 @@ bool test_circularbuf_w() {
 }
 
 int main() {
-    if (signal(SIGPIPE, [](int){abort();}) == SIG_ERR) {
-        ERROR_EXIT("Cannot setup SIGPIPE handler");
-    }
     Test tests[] = {
         test_filebuf_nonblocking,
         test_filebuf_rw,
@@ -208,6 +205,9 @@ int main() {
         test_circularbuf_overflow,
         test_circularbuf_w,
     };
+    if (signal(SIGPIPE, [](int){abort();}) == SIG_ERR) {
+        ERROR_EXIT("Cannot setup SIGPIPE handler");
+    }
     int failed = 0;
     for (auto t : tests) {
         setup();

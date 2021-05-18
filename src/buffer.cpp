@@ -123,7 +123,7 @@ void FIFOfilebuf::_file_rewind(size_t amt) {
         ERROR_EXIT("Cannot lseek");
     }
     LOG3("File #%d #%d: Rewinded r:-%lu %s\n", fd, reader_fd, amt, \
-         (amt == 0) ? "w:0 (HEAD)" : "");
+         (amt == 0) ? "w:0 to head" : "");
 }
 
 /* ========================================================================= */

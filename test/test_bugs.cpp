@@ -1,6 +1,4 @@
 #include "helper.h"
-#define SERVER_PORT  8787
-#define PROXY_PORT   8089
 
 
 int child_pid = 0;
@@ -22,7 +20,7 @@ void setup() {
     } else {
         close(child_inbox[PIPE_R]);
         close(parent_inbox[PIPE_W]);
-        sleep(5);  // wait for startup to complete
+        sleep(3);  // wait for startup to complete
     }
 }
 
@@ -67,6 +65,7 @@ void proxy_run(string command) {
 bool test_close_with_rst_instead_of_fin() {
     BEGIN();
     int client_sock = connect_TCP("localhost", PROXY_PORT);
+    sleep(1);
     auto request = "GET / HTTP/1.1\r\n\r\n";
     write_with_assert(client_sock, request, strlen(request));
     sleep(2);
@@ -90,6 +89,7 @@ bool test_close_with_rst_instead_of_fin() {
 bool test_signal_not_handled_correctly() {
     BEGIN();
     int client_sock = connect_TCP("localhost", PROXY_PORT);
+    sleep(1);
 
     send_SIGUSR1_to(child_pid);
     close(client_sock);
@@ -108,6 +108,7 @@ bool test_signal_not_handled_correctly() {
 bool test_sigpipe_error() {
     BEGIN();
     int client_sock = connect_TCP("localhost", PROXY_PORT);
+    sleep(1);
 
     close(client_sock);
     sleep(5);
@@ -127,7 +128,8 @@ bool test_event_del_failure() {
     BEGIN();
     int pid = send_SIGUSR1_background(100);
     int client_sock = connect_TCP("localhost", PROXY_PORT);
-    int server_sock = passive_TCP(SERVER_PORT);  // prepare server
+    int server_sock = passive_TCP(SERVER_PORT, true);  // prepare server
+    sleep(1);
     proxy_run("save_a_connection");  // keep track this connection
 
     auto request = "GET / HTTP/1.1\r\n\r\n";
@@ -150,15 +152,15 @@ bool test_event_del_failure() {
 }
 
 int main() {
-    if (signal(SIGPIPE, [](int){abort();}) == SIG_ERR) {
-        ERROR_EXIT("Cannot setup SIGPIPE handler");
-    }
     Test tests[] = {
         test_close_with_rst_instead_of_fin,
         test_signal_not_handled_correctly,
         test_sigpipe_error,
         test_event_del_failure,
     };
+    if (signal(SIGPIPE, [](int){abort();}) == SIG_ERR) {
+        ERROR_EXIT("Cannot setup SIGPIPE handler");
+    }
     int failed = 0;
     for (auto t : tests) {
         setup();

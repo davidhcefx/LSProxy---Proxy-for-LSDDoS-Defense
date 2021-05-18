@@ -160,7 +160,7 @@ class Filebuf {
     virtual void _file_rewind(size_t amt) {
         int whence = (amt == 0) ? SEEK_SET : SEEK_CUR;
         if (lseek(fd, -amt, whence) < 0) { ERROR_EXIT("Cannot lseek"); }
-        LOG3("File #%d: Rewinded -%lu %s\n", fd, amt, (amt == 0) ? "(HEAD)" : "");
+        LOG3("File #%d: Rewinded -%lu %s\n", fd, amt, (amt == 0) ? "to head" : "");
     }
     // error msg would be printed if failed
     static ssize_t _read_and_log(int fd, char* result, size_t max_size) {
