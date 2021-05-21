@@ -15,7 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cassert>
-#include <climits>
+#include <cstdint>
 #include <string>
 #include <memory>
 #include <vector>
@@ -23,16 +23,18 @@
 #include <unordered_set>
 #include <algorithm>
 #include "llhttp/llhttp.h"
-#define MAX_CONNECTION    6  //65536    // adjust it if needed? TODO: automatically setup
-#define MAX_HYBRIDBUF     MAX_CONNECTION
-#define MAX_FILE_DSC      7 * MAX_CONNECTION + 6  // see FILE_DESCRIPTOR_MAP
-#define SOCK_IO_BUF_SIZE  10  //10 * 1024  // socket io buffer size (KB)
-#define HIST_CACHE_SIZE   8  //8 * 1024   // in-mem cache for request history (KB)
-#define SOCK_CLOSE_WAITTIME 10  //30       // the timeout before leaving FIN-WAIT-2
-#define MONITOR_INTERVAL  10  // the frequency of monitoring transfer rate (s)
+#define MAX_CONNECTION    6 //65536  // adjust it if needed? TODO: automatically setup
+#define MAX_HYBRID_POOL   MAX_CONNECTION / 4  // # of pre-allocated Hybridbuf
+#define SOCK_IO_BUF_SIZE  10 //10 * 1024  // socket io buffer size (B)
+#define HIST_CACHE_SIZE   8 //8 * 1024   // in-mem cache for request history (B)
+#define SOCK_CLOSE_WAITTIME 10 //30       // the timeout before leaving FIN-WAIT-2
+#define MONITOR_INTERVAL    10  // the frequency of monitoring transfer rate (s)
 #define TRANSFER_RATE_THRES 1000     // transfer rate threshold (B/s)
-#define TRANS_TIMEOUT     4   // timeout before slow-mode transition finish
-// #define MAX_BODY_SIZE     ULONG_MAX  // 2^64 B
+#define TRANS_TIMEOUT       4   // timeout before slow-mode transition finish
+/* Don't modify below this line */
+#define MAX_FILE_DSC      7 * MAX_CONNECTION + 7  // see FILE_DESCRIPTORS
+#define MAX_REQUEST_SIZE  UINT64_MAX              // currently no enforcement
+#define MAX_RESPONSE_SIZE UINT64_MAX
 #define __BLANK_10        "          "
 #define LOG_LEVEL_1       // minimal info
 #define LOG_LEVEL_2       // abundant info
@@ -82,6 +84,7 @@ using std::swap;
  *     > Instead of closing it right away, we can maintain a free-server pool
  *       for speedup, but that's complicated.
  *     > Use event-based architecture to prevent proxy itself from LSDDoS.
+ *     > Reduce memory usage so that we can endure a lot of slow connections.
  * [Monitor] We monitor transfer-rate periodically, either in every certain
  *     amount of time or when certain amount of bytes received. (The period
  *     should be short, for it opens up a window for DoS attack)
@@ -97,22 +100,23 @@ using std::swap;
  * [Timeout] To prevent legitimate connections from been recognized as suspicious,
  *     we set keep-alive timeout short and close client connection if timeout.
  *
- * FILE_DESCRIPTOR_MAP: (n=MAX_CONNECTION)
- *     0 ~ 3    stdin, stdout, stderr, master_sock
- *     4 ~ n+3  Hybridbuf for history (one per connection)
- *   n+4 ~ n+6  event_base use around 3
- *   n+7 ~ 3n+6 Client & Server sockets (1-2 per conn)
- *  3n+7 ~ 7n+6 Filebuf for slow buffers (0-4 per conn)
+ * FILE_DESCRIPTORS: (n=MAX_CONNECTION)
+ *   stdin + stdout + stderr + master_sock           4
+ *   event_base use around 3                         3
+ *   Hybridbuf for history (0-1 per connection)      n
+ *   Client & Server sockets (1-2 per conn)         2n
+ *   Filebuf for slow buffers (0-4 per conn)        4n
+ *   Total:                                     7n + 7
  *
- * Progress:
+ * PROGRESS:
  * [x] Event-based arch.
  * [x] Fast-mode
  * [x] History temp
  * [x] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
  * [x] Transfer rate monitor
  * [x] Transition logic
- * [-] Shorter keep-alive timeout
  * [x] Detect server down
+ * [ ] Shorter keep-alive timeout
  */
 
 
@@ -131,7 +135,7 @@ class ConnectionError: public exception {};
 /* class for using a file as buffer */
 class Filebuf {
  public:
-    size_t data_size;
+    size_t data_size;  // might cause undefined behavior when exceed size_t
 
     explicit Filebuf(const char* alias = "");
     virtual ~Filebuf() {close(fd);}
@@ -298,7 +302,7 @@ class HttpParser {
 
 
 extern char global_buffer[SOCK_IO_BUF_SIZE];
-extern queue<shared_ptr<Hybridbuf>> free_hybridbuf;
+extern queue<shared_ptr<Hybridbuf>> hybridbuf_pool;
 class Connection;
 void add_event(struct event* evt, const struct timeval* timeout = NULL);
 void del_event(struct event* evt);
@@ -313,7 +317,7 @@ class Client {
     struct event* write_evt;
     Connection* conn;
     Circularbuf* queued_output;  // queued output for fast-mode
-    size_t recv_count;           // number of bytes received from client
+    uint64_t recv_count;         // number of bytes received from client
     /* Slow-mode buffers */
     Filebuf* request_buf;        // buffer for a single request
     Filebuf* request_tmp_buf;    // temp buffer for overflow requests
@@ -346,6 +350,12 @@ class Client {
     void free_queued_output() {
         if (queued_output) { delete queued_output; queued_output = NULL; }
     }
+    void release_request_history() {
+        if (request_history && hybridbuf_pool.size() < MAX_HYBRID_POOL) {
+            hybridbuf_pool.push(request_history);
+        }
+        request_history.reset();
+    }
     static void on_readable(int fd, short/*flag*/, void* arg);
     static void on_writable(int fd, short/*flag*/, void* arg);
 
@@ -364,7 +374,7 @@ class Server {
  public:
     static const char* address;        // the server to be protected
     static unsigned short port;        // the server to be protected
-    static unsigned connection_count;  // number of active connections
+    static unsigned active_count;      // number of active connections
     struct event* read_evt;   // both events have ptr keeping track of *this
     struct event* write_evt;
     Connection* conn;
@@ -390,15 +400,19 @@ class Server {
 /* class for handling client-server interactions */
 class Connection {
  public:
+    static size_t connection_count;
     Client* client;
     Server* server;
     HttpParser* parser;  // each connection shares a parser
 
-    Connection(): client{NULL}, server{NULL}, parser{NULL},
-                  fast_mode{true}, in_transition{false} {}
-    ~Connection() { free_server(); free_client(); free_parser(); }
+    Connection(): client{NULL}, server{NULL}, parser{NULL}, fast_mode{true},
+                  in_transition{false}
+    { connection_count++; }
+    ~Connection() {
+        free_server(); free_client(); free_parser(); connection_count--;
+    }
     bool is_fast_mode() { return fast_mode; }
-    // start to transition to slow-mode in stages
+    // start to transition to slow-mode; reduce memory as much as possible
     void set_slow_mode();
     // if transition to slow-mode still in progress
     bool is_in_transition() { return in_transition; }
@@ -443,7 +457,7 @@ inline ssize_t get_file_size(int fd) {
 }
 
 // raise system-wide RLIMIT_NOFILE
-void raise_open_file_limit(size_t value);
+void raise_open_file_limit(rlim_t value);
 // read as much as possible
 struct io_stat read_all(int fd, char* buffer, size_t max_size);
 // write as much as possible

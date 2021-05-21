@@ -46,6 +46,11 @@ int send_SIGUSR1_background(int milisec) {
     }
 }
 
+void consume_and_close(int fd) {
+    read_all(fd, global_buffer, sizeof(global_buffer));
+    close(fd);
+}
+
 void proxy_run(string command) {
     command += ";";
     write_with_assert(child_inbox[PIPE_W], command.c_str(), command.size());
@@ -56,7 +61,7 @@ void proxy_run(string command) {
 }
 
 /*********************************************************
- * # Close with RST instead of FIN
+ * # Close with RST instead of FIN (7df53)
  * - server not listening
  * - client (on the same host) sends some message
  * => proxy replied 503 to client, then close connection.
@@ -80,27 +85,7 @@ bool test_close_with_rst_instead_of_fin() {
 }
 
 /*********************************************************
- * # Signal not been handled correctly
- * - client connects
- * - fire SIGUSR1
- * - terminate client before callback timeouts
- * => Crash, for calling methods on an non-existence instance.
- *********************************************************/
-bool test_signal_not_handled_correctly() {
-    BEGIN();
-    int client_sock = connect_TCP("localhost", PROXY_PORT);
-    sleep(1);
-
-    send_SIGUSR1_to(child_pid);
-    close(client_sock);
-    sleep(15);  // wait for callback to trigger
-    proxy_run("ASSERT_proxy_alive");
-
-    END();
-}
-
-/*********************************************************
- * # SIGPIPE error
+ * # SIGPIPE error (a9d0b)
  * - client connects, but server not listening
  * - terminate client
  * => "Shutdown error #(13): Transport endpoint is not connected"
@@ -118,7 +103,7 @@ bool test_sigpipe_error() {
 }
 
 /*********************************************************
- * # event_del failure after fd closed
+ * # event_del failure after fd closed (85299)
  * - fire SIGUSR1 in the background every 0.1 seconds
  * - client sends "GET / HTTP/1.1\r\n\r\n", and terminates.
  * - server sends "\n\n", and terminates.
@@ -151,12 +136,57 @@ bool test_event_del_failure() {
     END();
 }
 
+/*********************************************************
+ * # Allocating from hybridbuf_pool without clearing content first (????)
+ * - prepare sufficient servers
+ * - repeat hybridbuf_pool.size() times:
+ *   - client sends "GET / HTTP/1.1\r\n" and terminates
+ * - client sends "GET / HTTP/1.1\r\n"
+ * - fire SIGUSR1
+ * - that client sends "\r\n" to finish the message
+ * => server receives the message plus some previous user's data
+ *********************************************************/
+bool test_alloc_hybridbuf_pool_without_clearing_content() {
+    BEGIN();
+    int server_sock = passive_TCP(SERVER_PORT, true);  // prepare server
+    auto half_request = "GET / HTTP/1.1\r\n";
+    for (int i = 0; i < MAX_HYBRID_POOL; i++) {
+        int client_sock = connect_TCP("localhost", PROXY_PORT);
+        write_with_assert(client_sock, half_request, strlen(half_request));
+        sleep(2);
+        consume_and_close(accept_connection(server_sock));
+        close(client_sock);
+    }
+    // should get dirty hybridbuf
+    int client_sock = connect_TCP("localhost", PROXY_PORT);
+    sleep(1);
+    proxy_run("save_a_connection");
+    write_with_assert(client_sock, half_request, strlen(half_request));
+    sleep(2);
+
+    send_SIGUSR1_to(child_pid);  // retrieve tainted history
+    sleep(2);
+    consume_and_close(accept_connection(server_sock));
+    sleep(1);    // transition should finish
+    proxy_run("ASSERT_not_fast_mode");
+    write_with_assert(client_sock, "\r\n", strlen("\r\n"));  // finish msg
+    sleep(2);
+
+    auto expected = string(half_request) + "\r\n";
+    int sock = accept_connection(server_sock);
+    auto stat = read_all(sock, global_buffer, sizeof(global_buffer));
+    ASSERT_EQUAL(expected.size(), stat.nbytes);
+    ASSERT_EQUAL(0, memcmp(global_buffer, expected.c_str(), expected.size()));
+
+    END();
+}
+
 int main() {
     Test tests[] = {
         test_close_with_rst_instead_of_fin,
-        test_signal_not_handled_correctly,
         test_sigpipe_error,
         test_event_del_failure,
+        test_alloc_hybridbuf_pool_without_clearing_content,
     };
     if (signal(SIGPIPE, [](int){abort();}) == SIG_ERR) {
         ERROR_EXIT("Cannot setup SIGPIPE handler");

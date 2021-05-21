@@ -4,7 +4,7 @@ CPP := $(shell if command -v g++-10 >/dev/null 2>&1; then echo 'g++-10'; \
 CPPVER := $(shell $(CPP) --version | sed -n -E '1s/[^0-9]*([0-9]+).*/\1/p')
 STDVER := $(shell if [ $(CPPVER) -ge 10 ]; then echo 'c++20'; else echo 'c++2a'; fi)
 CPPFLAGS := -Wall -Wextra -std=$(STDVER) -g -Og
-SRC := ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp helper.cpp
+SRC := ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp  # outer sources
 OBJ := $(SRC:.cpp=.o)
 TEST := test_buffer test_reply_503 test_response test_bugs
 
@@ -14,7 +14,7 @@ all: $(TEST)
 		./$$t || break; \
 	done
 
-test_%: test_%.o $(OBJ)
+test_%: test_%.o $(OBJ) helper.o
 	$(CPP) $(CPPFLAGS) -o $@ $^ ../src/llhttp/libllhttp.so -levent
 
 %.o: %.cpp ls_proxy.h helper.h

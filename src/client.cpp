@@ -7,8 +7,13 @@ Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
 {
     read_evt = new_read_event(fd, Client::on_readable, this);
     write_evt = new_write_event(fd, Client::on_writable, this);
-    request_history = free_hybridbuf.front();
-    free_hybridbuf.pop();
+    if (!hybridbuf_pool.empty()) {
+        request_history = hybridbuf_pool.front();
+        request_history->clear();  // clear before use
+        hybridbuf_pool.pop();
+    } else {
+        request_history = make_shared<Hybridbuf>("hist");
+    }
     LOG2("[%s] Allocated hist buf (#%d)\n", c_addr(), request_history->get_fd());
 }
 
@@ -19,11 +24,11 @@ Client::~Client() {
     free_event(read_evt);
     free_event(write_evt);
     close_socket_gracefully(get_fd());
-    free_hybridbuf.push(request_history);
-    if (queued_output) delete queued_output;
+    free_queued_output();
     if (request_buf) delete request_buf;
     if (request_tmp_buf) delete request_tmp_buf;
     if (response_buf) delete response_buf;
+    release_request_history();
 }
 
 void Client::recv_to_buffer_slowly(int fd) {

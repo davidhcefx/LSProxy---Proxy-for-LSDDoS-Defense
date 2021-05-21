@@ -3,11 +3,12 @@
 
 struct event_base* evt_base;
 char global_buffer[SOCK_IO_BUF_SIZE];  // buffer for each read operation
-queue<shared_ptr<Hybridbuf>> free_hybridbuf;
+queue<shared_ptr<Hybridbuf>> hybridbuf_pool;  // pre-allocated Hybridbuf
 /* class variables */
+size_t Connection::connection_count = 0;
 const char* Server::address;
 unsigned short Server::port;
-unsigned Server::connection_count = 0;
+unsigned Server::active_count = 0;
 llhttp_settings_t HttpParser::request_settings;
 llhttp_settings_t HttpParser::response_settings;
 
@@ -32,7 +33,7 @@ void HttpParser::init_all_settings() {
     response_settings.on_message_complete = message_complete_cb;
 }
 
-void raise_open_file_limit(size_t value) {
+void raise_open_file_limit(rlim_t value) {
     struct rlimit lim;
     if (getrlimit(RLIMIT_NOFILE, &lim) < 0) {
         ERROR_EXIT("Cannot getrlimit");
@@ -273,10 +274,10 @@ int main(int argc, char* argv[]) {
     // occupy fds
     raise_open_file_limit(MAX_FILE_DSC);
     int master_sock = passive_TCP(port);  // fd should be 3
-    for (int i = 0; i < MAX_HYBRIDBUF; i++) {
-        free_hybridbuf.push(make_shared<Hybridbuf>("hist"));
+    for (int i = 0; i < MAX_HYBRID_POOL; i++) {
+        hybridbuf_pool.push(make_shared<Hybridbuf>("hist"));
     }
-    assert(free_hybridbuf.back()->get_fd() == 3 + MAX_HYBRIDBUF);
+    assert(hybridbuf_pool.back()->get_fd() == 3 + MAX_HYBRID_POOL);
 
     // setup parser and signal handlers
     HttpParser::init_all_settings();

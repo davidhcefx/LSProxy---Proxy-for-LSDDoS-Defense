@@ -33,7 +33,7 @@ void teardown() {
 
 void proxy_set_all_slow_mode() {
     send_SIGUSR1_to(child_pid);
-    sleep(3);  // 3 seconds should be enough (for timeout = 1s)
+    sleep(3);  // 3 seconds should be enough (when no request yet)
 }
 
 void proxy_run(string command) {

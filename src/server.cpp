@@ -11,14 +11,14 @@ Server::Server(Connection* _conn): conn{_conn}, queued_output{NULL} {
         ERROR_EXIT("Cannot make socket nonblocking");
     }
     LOG2("[%15s] Connection created (#%d) (active: %d)\n", "SERVER", sock, \
-         ++Server::connection_count);
+         ++Server::active_count);
     read_evt = new_read_event(sock, Server::on_readable, this);
     write_evt = new_write_event(sock, Server::on_writable, this);
 }
 
 Server::~Server() {
     LOG2("[%15s] Connection closed (#%d) (active: %u)\n", "SERVER", get_fd(), \
-         --Server::connection_count);
+         --Server::active_count);
     del_event(read_evt);
     del_event(write_evt);
     free_event(read_evt);
@@ -27,7 +27,6 @@ Server::~Server() {
     if (queued_output) delete queued_output;
 }
 
-// TODO: why received zero twice in test_bugs last testcase?
 void Server::recv_to_buffer_slowly(int fd) {
     auto client = conn->client;
     auto stat = read_all(fd, global_buffer, sizeof(global_buffer));

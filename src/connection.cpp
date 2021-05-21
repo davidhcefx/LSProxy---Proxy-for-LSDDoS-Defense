@@ -12,6 +12,7 @@ void Connection::set_slow_mode() {
         parser = new HttpParser();
         client->pause_rw();
         /* history must be empty since no request had been sent */
+        client->release_request_history();
         client->resume_rw();
         set_transition_done();
         return;
@@ -26,8 +27,10 @@ void Connection::set_slow_mode() {
         server->free_queued_output();
     }
 
-    // retrieve previous packets and decommission fast-mode queue
+    // retrieve previous packets
     client->copy_history_to(client->request_buf);
+    client->release_request_history();
+    // decommission fast-mode queue
     while (client->queued_output->data_size() > 0) {
         client->queued_output->dump_to(client->response_buf);
     }
@@ -100,7 +103,7 @@ void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
     if (evutil_make_socket_nonblocking(sock) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot make socket nonblocking");
     }
-    if (free_hybridbuf.empty()) { [[unlikely]]
+    if (Connection::connection_count >= MAX_CONNECTION) { [[unlikely]]
         WARNING("Max connection <%d> reached", MAX_CONNECTION);
         reply_with_503_unavailable(sock);
         LOG1("[%s] Connection closed.\n", get_host_and_port(addr).c_str());

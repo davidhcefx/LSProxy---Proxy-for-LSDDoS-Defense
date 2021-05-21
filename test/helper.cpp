@@ -22,10 +22,10 @@ void run_proxy(unsigned short port, const char* server_addr, \
     // occupy fds
     raise_open_file_limit(MAX_FILE_DSC);
     int master_sock = passive_TCP(port, true);  // fd should be 3
-    for (int i = 0; i < MAX_HYBRIDBUF; i++) {
-        free_hybridbuf.push(make_shared<Hybridbuf>("hist"));
+    for (int i = 0; i < MAX_HYBRID_POOL; i++) {
+        hybridbuf_pool.push(make_shared<Hybridbuf>("hist"));
     }
-    // ASSERT_EQUAL(3 + MAX_HYBRIDBUF, free_hybridbuf.back()->get_fd());
+    // ASSERT_EQUAL(3 + MAX_HYBRID_POOL, hybridbuf_pool.back()->get_fd());
 
     // setup parser and signal handlers
     HttpParser::init_all_settings();

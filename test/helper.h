@@ -74,7 +74,7 @@ inline char getchar_with_timeout(int fd, int seconds) {
     char buf[1] = {'_'};
     if (read(fd, buf, 1) < 0) {
         sleep(seconds);
-        (void)read(fd, buf, 1);
+        (void)(read(fd, buf, 1) + 1);
     }
     return buf[0];
 }
