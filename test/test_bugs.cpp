@@ -137,7 +137,7 @@ bool test_event_del_failure() {
 }
 
 /*********************************************************
- * # Allocating from hybridbuf_pool without clearing content first (????)
+ * # Allocating from hybridbuf_pool without clearing content first (80d3e)
  * - prepare sufficient servers
  * - repeat hybridbuf_pool.size() times:
  *   - client sends "GET / HTTP/1.1\r\n" and terminates

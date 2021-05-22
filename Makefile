@@ -9,7 +9,7 @@ CPPFLAGS := -Wall -Wextra -std=$(STDVER) -g -Og
 #CPPFLAGS := -Wall -Wextra -std=$(STDVER) -O2
 
 
-all: g++9 libevent raise_limit simple_attack ls_proxy
+all: g++9 libevent check_limit simple_attack ls_proxy
 
 simple_attack: src/simple_attack.cpp
 	$(CPP) $(CPPFLAGS) -o $@ $^
@@ -51,8 +51,8 @@ libevent:
 		esac \
 	fi
 
-raise_limit:
-	./utils/raise_nofile_limit.sh
+check_limit:
+	./utils/check_rlimit_nofile_hard.sh
 
 test:
 	make -C test all

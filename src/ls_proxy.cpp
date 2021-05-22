@@ -216,6 +216,7 @@ void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
     static unordered_set<Connection*> conn_list;
     evt_list.clear();
     conn_list.clear();
+
     // get unique connections
     event_base_foreach_event(evt_base, add_to_list, &evt_list);
     for (auto evt : evt_list) {
@@ -227,7 +228,9 @@ void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
         if (conn->client->recv_count < threshold) {
             LOG1("[%s] Detected transfer rate < threshold! (%lu)\n", \
                  conn->client->c_addr(), conn->client->recv_count);
-            // conn->set_slow_mode();
+            if (conn->is_fast_mode() && !conn->is_in_transition()) {
+                conn->set_slow_mode();
+            }
         }
         conn->client->recv_count = 0;  // reset counter
     }
@@ -261,19 +264,20 @@ int message_complete_cb(llhttp_t* parser, const char* at, size_t/*len*/) {
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        printf("SYNOPSIS\n\t%s <server_addr> <server_port> [port]\n", argv[0]);
-        printf("\tserver_addr\tThe address of the server to be protected.\n");
-        printf("\tserver_port\tThe port of the server to be protected.\n");
-        printf("\tport\tThe port of this proxy to be listening on. (default=8080)\n");
+        printf("SYNOPSIS\n\t%s port <server_host> [server_port]\n", argv[0]);
+        printf("\tport\tThe port of this proxy.\n");
+        printf("\tserver_host\tThe host of the server to be protected.\n");
+        printf("\tserver_port\tThe port of the server. (default=80)\n");
         return 0;
     }
-    Server::address = argv[1];
-    Server::port = atoi(argv[2]);
-    unsigned short port = (argc >= 4) ? atoi(argv[3]) : 8080;
+    unsigned short port = atoi(argv[1]);
+    Server::address = argv[2];
+    Server::port = (argc >= 4) ? atoi(argv[3]) : 80;
+    if (!Server::test_server_alive()) return 1;
 
     // occupy fds
     raise_open_file_limit(MAX_FILE_DSC);
-    int master_sock = passive_TCP(port);  // fd should be 3
+    int master_sock = passive_TCP(port, true);  // fd should be 3
     for (int i = 0; i < MAX_HYBRID_POOL; i++) {
         hybridbuf_pool.push(make_shared<Hybridbuf>("hist"));
     }
@@ -297,6 +301,7 @@ int main(int argc, char* argv[]) {
     if (event_base_dispatch(evt_base) < 0) {  /* blocks here */
         ERROR_EXIT("Cannot dispatch event");
     }
+    LOG1("Clearing up...");
     event_base_foreach_event(evt_base, close_event_fd, NULL);
     event_base_free(evt_base);
     return 0;

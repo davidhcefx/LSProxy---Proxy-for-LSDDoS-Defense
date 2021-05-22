@@ -23,22 +23,22 @@
 #include <unordered_set>
 #include <algorithm>
 #include "llhttp/llhttp.h"
-#define MAX_CONNECTION    6 //65536  // adjust it if needed? TODO: automatically setup
+#define MAX_CONNECTION    65536      // adjust according to your needs/resources
 #define MAX_HYBRID_POOL   MAX_CONNECTION / 4  // # of pre-allocated Hybridbuf
-#define SOCK_IO_BUF_SIZE  10 //10 * 1024  // socket io buffer size (B)
-#define HIST_CACHE_SIZE   8 //8 * 1024   // in-mem cache for request history (B)
-#define SOCK_CLOSE_WAITTIME 10 //30       // the timeout before leaving FIN-WAIT-2
+#define SOCK_IO_BUF_SIZE  10 * 1024  // socket io buffer size (B)
+#define HIST_CACHE_SIZE   8 * 1024   // in-mem cache for request history (B)
+#define SOCK_CLOSE_WAITTIME 30       // the timeout before leaving FIN-WAIT-2
 #define MONITOR_INTERVAL    10  // the frequency of monitoring transfer rate (s)
 #define TRANSFER_RATE_THRES 1000     // transfer rate threshold (B/s)
 #define TRANS_TIMEOUT       4   // timeout before slow-mode transition finish
+#define LOG_LEVEL_1                  // minimal info
+#define LOG_LEVEL_2                  // abundant info
+#define LOG_LEVEL_3                  // very verbose (comment out to disable)
 /* Don't modify below this line */
 #define MAX_FILE_DSC      7 * MAX_CONNECTION + 7  // see FILE_DESCRIPTORS
 #define MAX_REQUEST_SIZE  UINT64_MAX              // currently no enforcement
 #define MAX_RESPONSE_SIZE UINT64_MAX
 #define __BLANK_10        "          "
-#define LOG_LEVEL_1       // minimal info
-#define LOG_LEVEL_2       // abundant info
-#define LOG_LEVEL_3       // very verbose
 #ifdef  LOG_LEVEL_1
 #define LOG1(fmt, ...) \
     { printf("%-10lu |" fmt, time(NULL) __VA_OPT__(,) __VA_ARGS__); }
@@ -117,6 +117,8 @@ using std::swap;
  * [x] Transition logic
  * [x] Detect server down
  * [ ] Shorter keep-alive timeout
+ * [ ] TLS support
+ * [ ] HTTP/2.0 support
  */
 
 
@@ -394,6 +396,7 @@ class Server {
     }
     static void on_readable(int fd, short flag, void* arg);
     static void on_writable(int fd, short/*flag*/, void* arg);
+    static bool test_server_alive();
 };
 
 
