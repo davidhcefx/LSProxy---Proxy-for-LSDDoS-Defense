@@ -1,4 +1,4 @@
-#include "ls_proxy.h"
+#include "buffer.h"
 
 
 Filebuf::Filebuf(const char* alias): data_size{0} {

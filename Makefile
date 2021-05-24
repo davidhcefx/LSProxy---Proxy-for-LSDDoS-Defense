@@ -5,17 +5,21 @@ CPP := $(shell if command -v g++-10 >/dev/null 2>&1; then echo 'g++-10'; \
             else echo 'g++'; fi)
 CPPVER := $(shell $(CPP) --version | sed -n -E '1s/[^0-9]*([0-9]+).*/\1/p')
 STDVER := $(shell if [ $(CPPVER) -ge 10 ]; then echo 'c++20'; else echo 'c++2a'; fi)
-CPPFLAGS := -Wall -Wextra -std=$(STDVER) -g -Og
-#CPPFLAGS := -Wall -Wextra -std=$(STDVER) -O2
+# pass a DEBUG=1 flag for debugging
+CPPFLAGS := -Wall -Wextra -std=$(STDVER) $(if $(DEBUG), -g -Og, -O2)
+SRC := $(addprefix src/, ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp)
 
 
-all: g++9 libevent check_limit simple_attack ls_proxy
+all: g++9 libevent check_limit ls_proxy simple_attack
+
+ls_proxy: $(SRC) src/*.h
+	$(CPP) $(CPPFLAGS) -o $@ $(SRC) src/llhttp/libllhttp.so -levent
 
 simple_attack: src/simple_attack.cpp
 	$(CPP) $(CPPFLAGS) -o $@ $^
 
-ls_proxy: src/ls_proxy.cpp src/buffer.cpp src/client.cpp src/server.cpp src/connection.cpp
-	$(CPP) $(CPPFLAGS) -o $@ $^ src/llhttp/libllhttp.so -levent
+test:
+	make -C test all
 
 g++9:
 	# check if g++-9 or above has been installed
@@ -53,9 +57,6 @@ libevent:
 
 check_limit:
 	./utils/check_rlimit_nofile_hard.sh
-
-test:
-	make -C test all
 
 clean:
 	rm -f simple_attack ls_proxy core*

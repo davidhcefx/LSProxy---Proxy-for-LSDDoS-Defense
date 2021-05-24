@@ -1,4 +1,8 @@
 #include "ls_proxy.h"
+#include "buffer.h"
+#include "client.h"
+#include "server.h"
+#include "connection.h"
 
 
 struct event_base* evt_base;
@@ -6,8 +10,7 @@ char global_buffer[SOCK_IO_BUF_SIZE];  // buffer for each read operation
 queue<shared_ptr<Hybridbuf>> hybridbuf_pool;  // pre-allocated Hybridbuf
 /* class variables */
 size_t Connection::connection_count = 0;
-const char* Server::address;
-unsigned short Server::port;
+struct sockaddr_in Server::address;
 unsigned Server::active_count = 0;
 llhttp_settings_t HttpParser::request_settings;
 llhttp_settings_t HttpParser::response_settings;
@@ -124,7 +127,7 @@ void close_after_timeout(int/*fd*/, short/*flag*/, void* arg) {
     delete t_arg;
 }
 
-int passive_TCP(unsigned short port, bool reuse, int qlen) {
+int passive_TCP(unsigned short port, bool reuse, int backlog) {
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons(port),
@@ -142,27 +145,15 @@ int passive_TCP(unsigned short port, bool reuse, int qlen) {
     if (bind(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot bind to port %d", port);
     }
-    if (listen(sockFd, qlen) < 0) { [[unlikely]]
+    if (listen(sockFd, backlog) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot listen");
     }
     LOG1("Listening on port %d...\n", port);
     return sockFd;
 }
 
-int connect_TCP(const char* host, unsigned short port) {
-    struct sockaddr_in addr;
-    struct addrinfo* info;
+int connect_TCP(const struct sockaddr_in& addr) {
     int sockFd;
-
-    if (getaddrinfo(host, NULL, NULL, &info) == 0) {  // TODO(davidhcefx): async DNS resolution (see libevent doc)
-        memcpy(&addr, info->ai_addr, sizeof(addr));
-        freeaddrinfo(info);
-    } else if ((addr.sin_addr.s_addr = inet_addr(host)) == INADDR_NONE) {
-        ERROR("Cannot resolve host addr: %s", host);
-        return -1;
-    }
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
 
     if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot create socket");
@@ -240,6 +231,18 @@ int close_event_fd(const struct event_base*, const struct event* evt, void*) {
     return close(event_get_fd(evt));
 }
 
+Connection* get_associated_conn(const struct event* evt) {
+    auto cb = event_get_callback(evt);
+    auto arg = event_get_callback_arg(evt);
+    if (cb == Client::on_readable || cb == Client::on_writable) {
+        return reinterpret_cast<Client*>(arg)->conn;
+    } else if (cb == Server::on_readable || cb == Server::on_writable) {
+        return reinterpret_cast<Server*>(arg)->conn;
+    } else {
+        return NULL;
+    }
+}
+
 int headers_complete_cb(llhttp_t* parser) {
     auto h_parser = reinterpret_cast<HttpParser*>(parser->data);
     // HEAD or 304 not modified MUST NOT has body
@@ -271,8 +274,12 @@ int main(int argc, char* argv[]) {
         return 0;
     }
     unsigned short port = atoi(argv[1]);
-    Server::address = argv[2];
-    Server::port = (argc >= 4) ? atoi(argv[3]) : 80;
+    Server::address = {
+        .sin_family = AF_INET,
+        .sin_port = htons((argc >= 4) ? atoi(argv[3]) : 80),
+        .sin_addr = resolve_host(argv[2]),
+        .sin_zero = {0},
+    };
     if (!Server::test_server_alive()) return 1;
 
     // occupy fds

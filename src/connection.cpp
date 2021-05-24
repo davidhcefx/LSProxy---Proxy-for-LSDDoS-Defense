@@ -1,4 +1,7 @@
-#include "ls_proxy.h"
+#include "buffer.h"
+#include "client.h"
+#include "server.h"
+#include "connection.h"
 
 
 void Connection::set_slow_mode() {

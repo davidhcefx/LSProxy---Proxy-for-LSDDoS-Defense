@@ -1,8 +1,11 @@
-#include "ls_proxy.h"
+#include "buffer.h"
+#include "client.h"
+#include "server.h"
+#include "connection.h"
 
 
 Server::Server(Connection* _conn): conn{_conn}, queued_output{NULL} {
-    int sock = connect_TCP(Server::address, Server::port);
+    int sock = connect_TCP(Server::address);
     if (sock < 0) { [[unlikely]]
         WARNING("Server down or having network issue.");
         throw ConnectionError();
@@ -130,14 +133,4 @@ void Server::on_writable(int fd, short/*flag*/, void* arg) {
     } else {
         server->send_request_slowly(fd);
     }
-}
-
-bool Server::test_server_alive() {
-    int sock = connect_TCP(Server::address, Server::port);
-    if (sock < 0) { [[unlikely]]
-        WARNING("Server down or having network issue.");
-        return false;
-    }
-    close(sock);
-    return true;
 }

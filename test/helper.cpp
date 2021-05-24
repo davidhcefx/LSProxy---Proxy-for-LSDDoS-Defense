@@ -16,8 +16,12 @@ void run_command_from_parent(int/*sig*/) {
 
 void run_proxy(unsigned short port, const char* server_addr, \
                unsigned short server_port) {
-    Server::address = server_addr;
-    Server::port = server_port;
+    Server::address = {
+        .sin_family = AF_INET,
+        .sin_port = htons(server_port),
+        .sin_addr = resolve_host(server_addr),
+        .sin_zero = {0},
+    };
 
     // occupy fds
     raise_open_file_limit(MAX_FILE_DSC);

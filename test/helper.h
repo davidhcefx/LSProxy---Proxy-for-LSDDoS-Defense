@@ -4,6 +4,10 @@
 #include <iostream>
 #include <sstream>
 #include "ls_proxy.h"
+#include "buffer.h"
+#include "client.h"
+#include "server.h"
+#include "connection.h"
 using std::cin;
 using std::cout;
 using std::endl;
@@ -92,6 +96,16 @@ inline void read_until(char delim, int fd, char* buf, size_t max_size) {
             break;
         }
     }
+}
+
+inline int connect_TCP(const char* host, unsigned short port) {
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr = resolve_host(host),
+        .sin_zero = {0},
+    };
+    return connect_TCP(addr);
 }
 
 // return accepted socket fd
