@@ -12,6 +12,13 @@ using std::cin;
 using std::cout;
 using std::endl;
 using std::stringstream;
+/* @adjust `ls_proxy.h`; would be read by Makefile */
+#include "../src/llhttp/llhttp.h"
+#define MAX_CONNECTION      6
+#define SOCK_IO_BUF_SIZE    500  // at least 380 for reply-503-msg
+#define HIST_CACHE_SIZE     20   // less than len(test_buffer::data)
+#define SOCK_CLOSE_WAITTIME 10
+/* @adjust end */
 #define SERVER_PORT  8787
 #define PROXY_PORT   8099
 #define DASH30      "=============================="

@@ -118,6 +118,7 @@ using std::swap;
  * [x] Detect server down
  * [ ] Shorter keep-alive timeout
  * [ ] TLS support
+ * [ ] IPv6 support
  * [ ] HTTP/2.0 support
  */
 

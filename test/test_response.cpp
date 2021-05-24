@@ -75,6 +75,9 @@ bool test_bodiless_HEAD_response() {
     sleep(2);
     proxy_run("ASSERT_first_end_of_msg_changed");  // msg should complete
 
+    close(client_sock);
+    close(sock);
+    close(server_sock);
     END();
 }
 
@@ -107,6 +110,9 @@ bool test_bodiless_304_response() {
     sleep(2);
     proxy_run("ASSERT_first_end_of_msg_changed");  // msg should complete
 
+    close(client_sock);
+    close(sock);
+    close(server_sock);
     END();
 }
 

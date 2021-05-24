@@ -308,7 +308,7 @@ int main(int argc, char* argv[]) {
     if (event_base_dispatch(evt_base) < 0) {  /* blocks here */
         ERROR_EXIT("Cannot dispatch event");
     }
-    LOG1("Clearing up...");
+    LOG1("Clearing up...\n");
     event_base_foreach_event(evt_base, close_event_fd, NULL);
     event_base_free(evt_base);
     return 0;

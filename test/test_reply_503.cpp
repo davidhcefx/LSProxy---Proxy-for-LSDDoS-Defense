@@ -45,6 +45,9 @@ bool test_reply_503_unit_test() {
     string msg(global_buffer);
     ASSERT_TRUE(check_content_length_matched(msg));
 
+    close(client_sock);
+    close(sock);
+    close(master_sock);
     END();
 }
 
@@ -66,6 +69,7 @@ bool test_reply_503_when_reached_MAX_CONNECTION() {
     string msg(global_buffer);
     ASSERT_TRUE(check_content_length_matched(msg));
 
+    close(client_sock);
     for (auto fd : clients) close(fd);
     END();
 }

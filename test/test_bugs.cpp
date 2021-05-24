@@ -81,6 +81,7 @@ bool test_close_with_rst_instead_of_fin() {
     string msg(global_buffer);
     ASSERT_TRUE(check_content_length_matched(msg));
 
+    close(client_sock);
     END();
 }
 
@@ -133,6 +134,7 @@ bool test_event_del_failure() {
 
     send_SIGINT_to(pid);
     if (waitpid(pid, &status, 0) < 0) ERROR_EXIT("Waitpid error");
+    close(server_sock);
     END();
 }
 
@@ -157,6 +159,7 @@ bool test_alloc_hybridbuf_pool_without_clearing_content() {
         consume_and_close(accept_connection(server_sock));
         close(client_sock);
     }
+
     // should get dirty hybridbuf
     int client_sock = connect_TCP("localhost", PROXY_PORT);
     sleep(1);
@@ -164,10 +167,10 @@ bool test_alloc_hybridbuf_pool_without_clearing_content() {
     write_with_assert(client_sock, half_request, strlen(half_request));
     sleep(2);
 
-    send_SIGUSR1_to(child_pid);  // retrieve tainted history
+    send_SIGUSR1_to(child_pid);  // retrieve from tainted history
     sleep(2);
-    consume_and_close(accept_connection(server_sock));
-    sleep(1);    // transition should finish
+    consume_and_close(accept_connection(server_sock));  // make trans finish
+    sleep(1);
     proxy_run("ASSERT_not_fast_mode");
     write_with_assert(client_sock, "\r\n", strlen("\r\n"));  // finish msg
     sleep(2);
@@ -178,6 +181,9 @@ bool test_alloc_hybridbuf_pool_without_clearing_content() {
     ASSERT_EQUAL(expected.size(), stat.nbytes);
     ASSERT_EQUAL(0, memcmp(global_buffer, expected.c_str(), expected.size()));
 
+    close(client_sock);
+    close(sock);
+    close(server_sock);
     END();
 }
 

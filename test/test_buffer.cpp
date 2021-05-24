@@ -1,12 +1,6 @@
 #include "helper.h"
-/*
- * ls_proxy.h should be adjusted first.
- */
-#include "../src/llhttp/llhttp.h"
-#define HIST_CACHE_SIZE     20   // less than total size of data
-#define MAX_HYBRID_SIZE     HIST_CACHE_SIZE
-#define SOCK_IO_BUF_SIZE    500  // more than total size of data; at least 380
-#define MAX_CIRCULAR_SIZE   SOCK_IO_BUF_SIZE - 1  // max storable size
+#define MAX_HYBRID_SIZE    HIST_CACHE_SIZE
+#define MAX_CIRCULAR_SIZE  SOCK_IO_BUF_SIZE - 1  // max storable size
 
 
 Filebuf* filebuf = NULL;

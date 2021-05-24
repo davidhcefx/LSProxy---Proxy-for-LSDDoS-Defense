@@ -51,6 +51,7 @@ void run_proxy(unsigned short port, const char* server_addr, \
     if (event_base_dispatch(evt_base) < 0) {  // blocking
         ERROR_EXIT("Cannot dispatch event");
     }
+    LOG1("Clearing up...\n");
     event_base_foreach_event(evt_base, close_event_fd, NULL);
     event_base_free(evt_base);
 }

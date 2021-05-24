@@ -4,9 +4,11 @@ CPP := $(shell if command -v g++-10 >/dev/null 2>&1; then echo 'g++-10'; \
 CPPVER := $(shell $(CPP) --version | sed -n -E '1s/[^0-9]*([0-9]+).*/\1/p')
 STDVER := $(shell if [ $(CPPVER) -ge 10 ]; then echo 'c++20'; else echo 'c++2a'; fi)
 CPPFLAGS := -Wall -Wextra -std=$(STDVER) -g -Og
-SRC := ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp  # outer sources
-OBJ := $(SRC:.cpp=.o)
+OUTER_SRC := ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp
+OUTER_OBJ := $(OUTER_SRC:.cpp=.o)
+OUTER_H := $(OUTER_SRC:.cpp=.h)
 TEST := test_buffer test_reply_503 test_response test_bugs
+OBJ := $(OUTER_OBJ) $(addsuffix .o, $(TEST)) helper.o
 
 
 all: $(TEST)
@@ -14,10 +16,10 @@ all: $(TEST)
 		./$$t || break; \
 	done
 
-test_%: test_%.o $(OBJ) helper.o
+test_%: test_%.o $(OUTER_OBJ) helper.o
 	$(CPP) $(CPPFLAGS) -o $@ $^ ../src/llhttp/libllhttp.so -levent
 
-%.o: %.cpp ls_proxy.h helper.h
+$(OBJ): %.o: %.cpp $(OUTER_H) helper.h
 	$(CPP) -c $(CPPFLAGS) -o $@ $< -levent
 
 # terminal rule (prerequisites are files)
@@ -28,19 +30,28 @@ ls_proxy.cpp: ../src/ls_proxy.cpp
 	# strip main function
 	sed '/^int main(int argc/Q' $^ > $@
 
-ls_proxy.h: test_buffer.cpp
-	# replace header with contents in test_buffer.cpp
-	replace_line() { \
-		line=$$(sed -n "/$$1/p" test_buffer.cpp | sed 's/[\/&]/\\&/g'); \
-		sed -i "s/$$1/$$line/" $@; \
-	}; \
-	cp ../src/ls_proxy.h $@ && \
-	replace_line '^#include.*llhttp\/llhttp\.h"' && \
-	replace_line '^#define HIST_CACHE_SIZE.*' && \
-	replace_line '^#define SOCK_IO_BUF_SIZE.*'
+%.h:: ../src/%.h
+	cp $^ $@
+
+ls_proxy.h: helper.h
+	# replace header with contents in helper.h
+	cp ../src/ls_proxy.h $@; \
+	sed '0,/@adjust/d;p' $^ | sed '/@adjust/Q' | while read line; do \
+		line_escaped=$$(echo "$$line" | sed 's/[\/&]/\\&/g'); \
+		case "$$line" in \
+		'#define'*) \
+			pattern=$$(echo "$$line" | sed -E 's/^([^ ]+ +[^ ]+).*/\1/' | \
+			           sed -E 's/([]\/^$.*]|\[)/\\&/g'); \
+			sed -i "s/^$$pattern.*/$$line_escaped/" $@ ;; \
+		'#include'*'/llhttp.h"'*) \
+			sed -i "s/^#include.*\/llhttp\.h\"/$$line_escaped/" $@ ;; \
+		*) \
+			echo "Unhandled header: $$line"; exit 1 ;; \
+		esac \
+	done
 
 clean:
-	rm -f ls_proxy.h $(SRC) *.o $(TEST) core*
+	rm -f $(OUTER_SRC) $(OBJ) $(OUTER_H) $(TEST) core*
 
 .PHONY: all clean
 .PRECIOUS: %.o
