@@ -183,6 +183,20 @@ class HttpParser {
 
 
 /******************* Utility functions *******************/
+// raise system-wide RLIMIT_NOFILE
+void raise_open_file_limit(rlim_t value);
+// read as much as possible
+struct io_stat read_all(int fd, char* buffer, size_t max_size);
+// write as much as possible
+struct io_stat write_all(int fd, const char* data, size_t size);
+
+// get the size of the file associated with fd
+inline ssize_t get_file_size(int fd) {
+    struct stat info;
+    if (fstat(fd, &info) < 0) [[unlikely]] ERROR_EXIT("Cannot fstat");
+    return info.st_size;
+}
+
 inline char* get_host(const struct sockaddr_in& addr) {
     return inet_ntoa(addr.sin_addr);
 }
@@ -196,13 +210,12 @@ inline string get_host_and_port(const struct sockaddr_in& addr) {
     return string(get_host(addr)) + ":" + to_string(get_port(addr));
 }
 
-// host can be either a hostname or an IP address
+// host can be either a hostname (DNS lookup) or an IP address
 inline struct in_addr resolve_host(const char* host) {
     struct addrinfo* info;
     struct in_addr sin_addr;
 
-    // TODO(davidhcefx): async DNS resolution (see libevent doc)
-    if (getaddrinfo(host, NULL, NULL, &info) == 0) {
+    if (getaddrinfo(host, NULL, NULL, &info) == 0) {  // time consuming
         sin_addr = ((struct sockaddr_in*)info->ai_addr)->sin_addr;
         freeaddrinfo(info);
     } else if ((sin_addr.s_addr = inet_addr(host)) == INADDR_NONE) {
@@ -211,28 +224,16 @@ inline struct in_addr resolve_host(const char* host) {
     return sin_addr;
 }
 
-inline ssize_t get_file_size(int fd) {
-    struct stat info;
-    if (fstat(fd, &info) < 0) [[unlikely]] ERROR_EXIT("Cannot fstat");
-    return info.st_size;
-}
-
-// raise system-wide RLIMIT_NOFILE
-void raise_open_file_limit(rlim_t value);
-// read as much as possible
-struct io_stat read_all(int fd, char* buffer, size_t max_size);
-// write as much as possible
-struct io_stat write_all(int fd, const char* data, size_t size);
+// return master socket Fd
+int passive_TCP(unsigned short port, bool reuse = false, int backlog = 128);
+// return socket Fd
+int connect_TCP(const struct sockaddr_in& addr);
 // reply with contents of 'res/503.html' and return num of bytes written
 size_t reply_with_503_unavailable(int sock);
 // shutdown write; wait SOCK_CLOSE_WAITTIME seconds (async) for FIN packet
 void close_socket_gracefully(int fd);
 // timer callback
 void close_after_timeout(int/*fd*/, short/*flag*/, void* arg);
-// return master socket Fd
-int passive_TCP(unsigned short port, bool reuse = false, int backlog = 128);
-// return socket Fd
-int connect_TCP(const struct sockaddr_in& addr);
 // break event_base loop on signal
 void break_event_loop(int/*sig*/);
 // put current connections to slow-mode on signal

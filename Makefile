@@ -10,7 +10,7 @@ CPPFLAGS := -Wall -Wextra -std=$(STDVER) $(if $(DEBUG), -g -Og, -O2)
 SRC := $(addprefix src/, ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp)
 
 
-all: g++9 libevent check_limit ls_proxy simple_attack
+all: g++9 libevent check_limit shorten_timeout ls_proxy simple_attack
 
 ls_proxy: $(SRC) src/*.h
 	$(CPP) $(CPPFLAGS) -o $@ $(SRC) src/llhttp/libllhttp.so -levent
@@ -58,7 +58,10 @@ libevent:
 check_limit:
 	./utils/check_rlimit_nofile_hard.sh
 
+shorten_timeout:
+	./utils/shorten_connection_timeout.sh
+
 clean:
 	rm -f simple_attack ls_proxy core*
 
-.PHONY: all test clean raise_limit gnu++2a libevent
+.PHONY: all test g++9 libevent check_limit shorten_timeout clean

@@ -86,6 +86,45 @@ struct io_stat write_all(int fd, const char* data, size_t size) {
     return stat;
 }
 
+int passive_TCP(unsigned short port, bool reuse, int backlog) {
+    struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port),
+        .sin_addr = {.s_addr = INADDR_ANY},
+        .sin_zero = {0},
+    };
+    int sockFd;
+
+    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
+        ERROR_EXIT("Cannot create socket");
+    }
+    if (reuse && evutil_make_listen_socket_reuseable_port(sockFd) < 0) { [[unlikely]]
+        ERROR_EXIT("Cannot set socket port reusable");
+    }
+    if (bind(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { [[unlikely]]
+        ERROR_EXIT("Cannot bind to port %d", port);
+    }
+    if (listen(sockFd, backlog) < 0) { [[unlikely]]
+        ERROR_EXIT("Cannot listen");
+    }
+    LOG1("Listening on port %d...\n", port);
+    return sockFd;
+}
+
+int connect_TCP(const struct sockaddr_in& addr) {
+    int sockFd;
+
+    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
+        ERROR_EXIT("Cannot create socket");
+    }
+    if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {  // time consuming
+        ERROR("Cannot connect to %s:%d", get_host(addr), get_port(addr));
+        return -1;
+    }
+    // LOG2("Connected to %s:%d\n", get_host(addr), get_port(addr));
+    return sockFd;
+}
+
 size_t reply_with_503_unavailable(int sock) {
     int file_fd = open("utils/503.html", O_RDONLY);
     if (file_fd < 0) [[unlikely]] ERROR_EXIT("Cannot open 'utils/503.html'");
@@ -125,45 +164,6 @@ void close_after_timeout(int/*fd*/, short/*flag*/, void* arg) {
     close(t_arg->fd);
     LOG3("#%d closed.\n", t_arg->fd);
     delete t_arg;
-}
-
-int passive_TCP(unsigned short port, bool reuse, int backlog) {
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(port),
-        .sin_addr = {.s_addr = INADDR_ANY},
-        .sin_zero = {0},
-    };
-    int sockFd;
-
-    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
-        ERROR_EXIT("Cannot create socket");
-    }
-    if (reuse && evutil_make_listen_socket_reuseable_port(sockFd) < 0) { [[unlikely]]
-        ERROR_EXIT("Cannot set socket port reusable");
-    }
-    if (bind(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) { [[unlikely]]
-        ERROR_EXIT("Cannot bind to port %d", port);
-    }
-    if (listen(sockFd, backlog) < 0) { [[unlikely]]
-        ERROR_EXIT("Cannot listen");
-    }
-    LOG1("Listening on port %d...\n", port);
-    return sockFd;
-}
-
-int connect_TCP(const struct sockaddr_in& addr) {
-    int sockFd;
-
-    if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
-        ERROR_EXIT("Cannot create socket");
-    }
-    if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {  // TODO(davidhcefx): non-blocking connect
-        ERROR("Cannot connect to %s:%d", get_host(addr), get_port(addr));
-        return -1;
-    }
-    // LOG2("Connected to %s:%d\n", get_host(addr), get_port(addr));
-    return sockFd;
 }
 
 void break_event_loop(int/*sig*/) {
