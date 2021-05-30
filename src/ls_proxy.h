@@ -228,6 +228,8 @@ inline struct in_addr resolve_host(const char* host) {
 int passive_TCP(unsigned short port, bool reuse = false, int backlog = 128);
 // return socket Fd
 int connect_TCP(const struct sockaddr_in& addr);
+// return next local address in range: 127.0.0.[1-255] : [4100-65100]
+const struct sockaddr_in* next_local_addr();
 // reply with contents of 'res/503.html' and return num of bytes written
 size_t reply_with_503_unavailable(int sock);
 // shutdown write; wait SOCK_CLOSE_WAITTIME seconds (async) for FIN packet

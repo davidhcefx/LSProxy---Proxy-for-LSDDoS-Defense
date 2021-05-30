@@ -56,7 +56,7 @@ libevent:
 	fi
 
 check_limit:
-	./utils/check_rlimit_nofile_hard.sh
+	./utils/check_rlimit_nofile_raisable.sh
 
 shorten_timeout:
 	./utils/shorten_connection_timeout.sh

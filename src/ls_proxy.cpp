@@ -112,17 +112,50 @@ int passive_TCP(unsigned short port, bool reuse, int backlog) {
 }
 
 int connect_TCP(const struct sockaddr_in& addr) {
+    const auto total_local_addr = 255 * (65100 - 4100 + 1);  // |{next_local_addr()}|
     int sockFd;
 
     if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot create socket");
     }
-    if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {  // time consuming
+    for (int i = 0; i < total_local_addr; i++) {  // linear probing (slow when #conn > 14M)
+        auto lc_addr = next_local_addr();
+        if (bind(sockFd, (struct sockaddr*)lc_addr, sizeof(*lc_addr)) >= 0) { [[likely]]
+            break;
+        }
+        if (i >= total_local_addr - 1) { [[unlikely]]
+            ERROR("bind: Used up all ports!");
+            return -1;
+        }
+    }
+    if (connect(sockFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {  // time consuming
         ERROR("Cannot connect to %s:%d", get_host(addr), get_port(addr));
         return -1;
     }
     // LOG2("Connected to %s:%d\n", get_host(addr), get_port(addr));
     return sockFd;
+}
+
+const struct sockaddr_in* next_local_addr() {
+    static struct sockaddr_in addr = {
+        .sin_family = AF_INET,
+        .sin_port = 0,
+        .sin_addr = {htonl(0x7f000001)},  // range: 127.0.0.[1-255]
+        .sin_zero = {0},
+    };
+    static unsigned short port = 4100;    // range: [4100-65100]
+
+    if (++port > 65100) { [[unlikely]]    // advance port
+        port = 4100;
+        auto ip = addr.sin_addr.s_addr;
+#if defined(__BYTE_ORDER__) && (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        addr.sin_addr.s_addr += (ip == 0xff00007f) ? 2 << 24 : 1 << 24;
+#else
+        addr.sin_addr.s_addr = (ip == 0x7f0000ff) ? 0x7f000001 : ip + 1;
+#endif
+    }
+    addr.sin_port = htons(port);
+    return &addr;
 }
 
 size_t reply_with_503_unavailable(int sock) {
