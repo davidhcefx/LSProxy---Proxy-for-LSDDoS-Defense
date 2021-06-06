@@ -1,13 +1,14 @@
 DISTRO := $(shell sed -n -E 's/^NAME="(.*)"/\1/p' /etc/*release)
 SUDO := sudo
-CPP := $(shell if command -v g++-10 >/dev/null 2>&1; then echo 'g++-10'; \
+SRC := $(addprefix src/, ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp)
+# delayed expansions
+CPP = $(shell if command -v g++-10 >/dev/null 2>&1; then echo 'g++-10'; \
             elif command -v g++-9 >/dev/null 2>&1; then echo 'g++-9'; \
             else echo 'g++'; fi)
-CPPVER := $(shell $(CPP) --version | sed -n -E '1s/[^0-9]*([0-9]+).*/\1/p')
-STDVER := $(shell if [ $(CPPVER) -ge 10 ]; then echo 'c++20'; else echo 'c++2a'; fi)
+CPPVER = $(shell $(CPP) --version | sed -n -E '1s/[^0-9]*([0-9]+).*/\1/p')
+STDVER = $(shell if [ "$(CPPVER)" -ge 10 ]; then echo 'c++20'; else echo 'c++2a'; fi)
 # pass a DEBUG=1 flag for debugging
-CPPFLAGS := -Wall -Wextra -std=$(STDVER) $(if $(DEBUG), -g -Og, -O2)
-SRC := $(addprefix src/, ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp)
+CPPFLAGS = -Wall -Wextra -std=$(STDVER) $(if $(DEBUG), -g -Og, -O2)
 
 
 all: g++9 libevent check_limit shorten_timeout ls_proxy simple_attack
@@ -23,10 +24,10 @@ test:
 
 g++9:
 	# check if g++-9 or above has been installed
-	if [ $(CPPVER) -lt 9 ]; then \
+	if [ "$(CPPVER)" -lt 9 ]; then \
 		case "$(DISTRO)" in \
 		*Ubuntu*|*Debian*) \
-			# install 'add-apt-repository' \
+			# install 'add-apt-repository'
 			$(SUDO) apt update && $(SUDO) apt-get install -y software-properties-common && \
 			$(SUDO) add-apt-repository -y ppa:ubuntu-toolchain-r/test && $(SUDO) apt-get update && \
 			($(SUDO) apt-get install -y g++-10 || $(SUDO) apt-get install -y g++-9) ;; \
@@ -42,7 +43,7 @@ g++9:
 
 libevent:
 	# check if libevent has been installed
-	if [ -z "`ldconfig -p | grep libevent`" ]; then \
+	if $(CPP) -levent 2>&1 | grep -q 'cannot find -levent'; then \
 		case "$(DISTRO)" in \
 		*Ubuntu*|*Debian*) \
 			$(SUDO) apt-get update && $(SUDO) apt-get install -y libevent-dev ;; \

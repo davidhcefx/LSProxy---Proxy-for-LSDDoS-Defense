@@ -2,7 +2,7 @@ CPP := $(shell if command -v g++-10 >/dev/null 2>&1; then echo 'g++-10'; \
 			elif command -v g++-9 >/dev/null 2>&1; then echo 'g++-9'; \
 			else echo 'g++'; fi)
 CPPVER := $(shell $(CPP) --version | sed -n -E '1s/[^0-9]*([0-9]+).*/\1/p')
-STDVER := $(shell if [ $(CPPVER) -ge 10 ]; then echo 'c++20'; else echo 'c++2a'; fi)
+STDVER := $(shell if [ "$(CPPVER)" -ge 10 ]; then echo 'c++20'; else echo 'c++2a'; fi)
 CPPFLAGS := -Wall -Wextra -std=$(STDVER) -g -Og
 OUTER_SRC := ls_proxy.cpp buffer.cpp client.cpp server.cpp connection.cpp
 OUTER_OBJ := $(OUTER_SRC:.cpp=.o)
@@ -36,7 +36,7 @@ ls_proxy.cpp: ../src/ls_proxy.cpp
 ls_proxy.h: helper.h
 	# replace header with contents in helper.h
 	cp ../src/ls_proxy.h $@; \
-	sed '0,/@adjust/d;p' $^ | sed '/@adjust/Q' | while read line; do \
+	sed '0,/@adjust/d;p' $^ | sed '/@adjust/Q' | while read -r line; do \
 		line_escaped=$$(echo "$$line" | sed 's/[\/&]/\\&/g'); \
 		case "$$line" in \
 		'#define'*) \
