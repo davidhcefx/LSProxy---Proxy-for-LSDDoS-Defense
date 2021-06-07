@@ -13,8 +13,8 @@ Server::Server(Connection* _conn): conn{_conn}, queued_output{NULL} {
     if (evutil_make_socket_nonblocking(sock) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot make socket nonblocking");
     }
-    LOG2("[%15s] Connection created (#%d) (active: %d)\n", "SERVER", sock, \
-         ++Server::active_count);
+    LOG2("[%15s] Connection created (#%d|#%d) (active: %d)\n", "SERVER", \
+         conn->client->get_fd(), sock, ++Server::active_count);
     read_evt = new_read_event(sock, Server::on_readable, this);
     write_evt = new_write_event(sock, Server::on_writable, this);
 }

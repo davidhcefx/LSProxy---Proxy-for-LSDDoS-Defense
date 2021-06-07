@@ -13,7 +13,8 @@ class Client {
     struct event* write_evt;
     Connection* conn;
     Circularbuf* queued_output;  // queued output for fast-mode
-    uint64_t recv_count;         // number of bytes received from client
+    uint64_t send_count;         // # of bytes sent by client
+    uint64_t recv_count;         // # of bytes received by client
     /* Slow-mode buffers */
     Filebuf* request_buf;        // buffer for a single request
     Filebuf* request_tmp_buf;    // temp buffer for overflow requests
@@ -36,6 +37,7 @@ class Client {
         start_send();
         LOG3("[%s] Client been set to reply-only mode.\n", c_addr());
     }
+    // TODO(davidhcefx): maybe we could enable send at the same time?
     void pause_rw() { stop_recv(); stop_send(); LOG3("[%s] Paused.\n", c_addr()); }
     void resume_rw() { start_recv(); start_send(); LOG3("[%s] Resumed.\n", c_addr()); }
     // keep track of incomplete requests; throw ParserError

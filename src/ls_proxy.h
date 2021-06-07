@@ -3,11 +3,13 @@
 #include <unistd.h>
 #include <signal.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <errno.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/types.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <event2/event.h>
@@ -60,7 +62,9 @@
 #define ERROR(fmt, ...)   \
     { fprintf(stderr, "[Error] " fmt ": %s (%s:%d)\n" __VA_OPT__(,) \
               __VA_ARGS__, strerror(errno), __FILE__, __LINE__); }
-#define ERROR_EXIT(...)   { ERROR(__VA_ARGS__); abort(); }
+#define ERROR_EXIT(...)   { ERROR(__VA_ARGS__); ABORT(); }
+void abort_and_dump();
+#define ABORT()           { abort_and_dump(); }
 using std::string;
 using std::to_string;
 using std::shared_ptr;
@@ -78,13 +82,13 @@ using std::swap;
  *     slow-mode if we found it suspicious, but no way to reverse.
  * [Fast mode] In fast-mode, we forward packets directly. A buffer might be used
  *     for storing temporary data that cannot be forwarded.
- * [Slow mode] In slow-mode, we forward requests ONE AT A TIME and close server
- *     connection after each response. We receive the entire response before
- *     sending back to prevent LSDDoS read attacks.
- *     > Instead of closing it right away, we can maintain a free-server pool
- *       for speedup, but that's complicated.
+ * [Slow mode] In slow-mode, we buffer incomplete requests and forward them
+ *     one at a time. We receive server's response at full speed, and close
+ *     the connection as soon as it finished.
  *     > Use event-based architecture to prevent proxy itself from LSDDoS.
  *     > Reduce memory usage so that we can endure a lot of slow connections.
+ *     > [Future work] If it was static response and we were on the same host,
+ *       one optimization is to read file directly.
  * [Monitor] We monitor transfer-rate periodically, either in every certain
  *     amount of time or when certain amount of bytes received. (The period
  *     should be short, for it opens up a window for DoS attack)

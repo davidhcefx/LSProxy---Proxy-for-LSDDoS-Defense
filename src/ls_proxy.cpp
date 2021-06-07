@@ -239,20 +239,24 @@ void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
     evt_list.clear();
     conn_list.clear();
 
-    // get unique connections
+    // get unique fast-mode connections, since we only care about fast ones
     event_base_foreach_event(evt_base, add_to_list, &evt_list);
     for (auto evt : evt_list) {
-        if (auto conn = get_associated_conn(evt)) conn_list.insert(conn);
+        if (auto conn = get_associated_conn(evt); conn && conn->is_fast_mode()) {
+            conn_list.insert(conn);
+        }
     }
-    // check transfer rate for each fast-connections
-    const auto target_count = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
+    // check transfer rate
+    const size_t target_count = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
     for (auto conn : conn_list) {
-        if (conn->is_fast_mode() && conn->client->recv_count < target_count) {
-            LOG1("[%s] Detected transfer rate < threshold! (%lu)\n", \
-                 conn->client->c_addr(), conn->client->recv_count);
+        auto send_c = conn->client->send_count;
+        auto recv_c = conn->client->recv_count;
+        if (send_c < target_count && recv_c < target_count) {
+            LOG1("[%s] Detected transfer rate < threshold! (%lu, %lu)\n", \
+                 conn->client->c_addr(), send_c, recv_c);
             conn->set_slow_mode();
         }
-        conn->client->recv_count = 0;  // reset counter
+        conn->client->send_count = conn->client->recv_count = 0;  // reset counter
     }
 }
 
@@ -292,6 +296,20 @@ int message_complete_cb(llhttp_t* parser, const char* at, size_t/*len*/) {
     // TODO(davidhcefx): change to some public api instead of accessing method
     //                   or status_code directly.
     return 0;
+}
+
+void abort_and_dump() {
+    // make sure there are enough spaces for core dumps (~130M)
+    fprintf(stderr, "Generating core dumps...\n");
+    if (auto dir = opendir("/tmp/")) {
+        while (auto ent = readdir(dir)) {
+            if (auto n = string(ent->d_name); n.starts_with("ls_proxy_buf")) {
+                unlink((string("/tmp/") + n).c_str());
+            }
+        }
+        closedir(dir);
+    }
+    abort();
 }
 
 int main(int argc, char* argv[]) {

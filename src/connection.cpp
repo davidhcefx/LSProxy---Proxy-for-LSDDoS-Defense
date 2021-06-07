@@ -45,7 +45,7 @@ void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
     // first store to global_buffer
     auto stat_c = read_all(client->get_fd(), global_buffer,
                            server->queued_output->remaining_space());
-    client->recv_count += stat_c.nbytes;
+    client->send_count += stat_c.nbytes;
     try {
         client->keep_track_request_history(global_buffer, stat_c.nbytes);
     } catch (ParserError& err) {
@@ -80,6 +80,7 @@ void Connection::fast_forward(Server*/*server*/, Client*/*client*/) {
     // append to client's queued output, and write them out
     auto stat_s = client->queued_output->read_all_from(server->get_fd());
     auto stat_c = client->queued_output->write_all_to(client->get_fd());
+    client->recv_count += stat_c.nbytes;
     LOG2("[%s] %6lu <<<< queue(%lu) <<<< %-6lu [SERVER]\n", client->c_addr(),
          stat_c.nbytes, client->queued_output->data_size(), stat_s.nbytes);
     if (stat_s.has_eof) { [[unlikely]]  // server closed
