@@ -11,8 +11,9 @@
     ```sh
     make
     make test
-    ./ls_proxy 8080 127.0.0.1 80
+    ./ls_proxy 8080 localhost
     ```
+    - Alternatively, run in the background: `./ls_proxy 8080 localhost > $(date -Isec).log 2>&1 &`.
 
 3. Configure DNS records. (optional)
     - Since **ls_proxy** acts as a reverse proxy, we might want to point our domain to the address of the proxy.

@@ -224,9 +224,7 @@ void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg) {
     auto t_arg = reinterpret_cast<struct timer_arg*>(arg);
     for (auto evt : *(t_arg->evt_list)) {
         if (auto conn = get_associated_conn(evt)) {
-            if (event_pending(evt, EV_READ | EV_WRITE, NULL) /* event exists */ \
-                    && conn->is_fast_mode()          /* not slow-mode */ \
-                    && !conn->is_in_transition()) {  /* not transitioning */
+            if (event_pending(evt, EV_READ | EV_WRITE, NULL)) { // event exists
                 conn->set_slow_mode();
             }
         }
@@ -246,15 +244,13 @@ void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
     for (auto evt : evt_list) {
         if (auto conn = get_associated_conn(evt)) conn_list.insert(conn);
     }
-    // check transfer rate
+    // check transfer rate for each fast-connections
+    const auto target_count = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
     for (auto conn : conn_list) {
-        const auto threshold = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
-        if (conn->client->recv_count < threshold) {
+        if (conn->is_fast_mode() && conn->client->recv_count < target_count) {
             LOG1("[%s] Detected transfer rate < threshold! (%lu)\n", \
                  conn->client->c_addr(), conn->client->recv_count);
-            if (conn->is_fast_mode() && !conn->is_in_transition()) {
-                conn->set_slow_mode();
-            }
+            conn->set_slow_mode();
         }
         conn->client->recv_count = 0;  // reset counter
     }

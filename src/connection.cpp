@@ -5,6 +5,7 @@
 
 
 void Connection::set_slow_mode() {
+    if (!fast_mode || in_transition) [[unlikely]] return;  // already being
     LOG2("[%s] Connection setting to slow mode...\n", client->c_addr());
     fast_mode = false;
     in_transition = true;

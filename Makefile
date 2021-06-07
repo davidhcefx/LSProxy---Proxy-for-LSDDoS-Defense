@@ -27,7 +27,7 @@ g++9:
 	if [ "$(CPPVER)" -lt 9 ]; then \
 		case "$(DISTRO)" in \
 		*Ubuntu*|*Debian*) \
-			# install 'add-apt-repository'
+			# install 'add-apt-repository' \
 			$(SUDO) apt update && $(SUDO) apt-get install -y software-properties-common && \
 			$(SUDO) add-apt-repository -y ppa:ubuntu-toolchain-r/test && $(SUDO) apt-get update && \
 			($(SUDO) apt-get install -y g++-10 || $(SUDO) apt-get install -y g++-9) ;; \

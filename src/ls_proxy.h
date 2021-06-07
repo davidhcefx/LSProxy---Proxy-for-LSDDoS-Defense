@@ -33,7 +33,7 @@
 #define TRANS_TIMEOUT       4   // timeout before slow-mode transition finish
 #define LOG_LEVEL_1                  // minimal info
 #define LOG_LEVEL_2                  // abundant info
-#define LOG_LEVEL_3                  // very verbose (comment out to disable)
+//#define LOG_LEVEL_3                  // very verbose (comment out to disable)
 /* Don't modify below this line */
 #define MAX_FILE_DSC      7 * MAX_CONNECTION + 7  // see FILE_DESCRIPTORS
 #define MAX_REQUEST_SIZE  UINT64_MAX              // currently no enforcement

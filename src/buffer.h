@@ -11,7 +11,7 @@ class Filebuf {
     size_t data_size;  // might cause undefined behavior when exceed size_t
 
     explicit Filebuf(const char* alias = "");
-    virtual ~Filebuf() {close(fd);}
+    virtual ~Filebuf() { close(fd); unlink(file_name.c_str()); }
     // make sure content was cleared before storing; data might lost upon disk failure
     virtual void store(const char* data, size_t size) {_file_write(data, size);}
     // error msg would be printed if failed
