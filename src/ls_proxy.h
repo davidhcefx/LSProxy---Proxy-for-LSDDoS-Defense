@@ -4,6 +4,7 @@
 #include <signal.h>
 #include <fcntl.h>
 #include <dirent.h>
+#include <getopt.h>
 #include <errno.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
@@ -33,6 +34,7 @@
 #define MONITOR_INTERVAL    10  // the frequency of monitoring transfer rate (s)
 #define TRANSFER_RATE_THRES 1000     // transfer rate threshold (B/s)
 #define TRANS_TIMEOUT       4   // timeout before slow-mode transition finish
+#define TMP_PREFIX          "/tmp"   // temp folder prefix
 #define LOG_LEVEL_1                  // minimal info
 #define LOG_LEVEL_2                  // abundant info
 //#define LOG_LEVEL_3                  // very verbose (comment out to disable)
@@ -254,6 +256,8 @@ void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/);
 int close_event_fd(const struct event_base*, const struct event*, void*);
 // get associated Connection ptr or NULL
 Connection* get_associated_conn(const struct event* evt);
+const unordered_set<Connection*>* get_all_connections();
+const unordered_set<Connection*>* get_all_fast_connections();
 
 /******************* Parser callbacks ********************/
 int headers_complete_cb(llhttp_t* parser);

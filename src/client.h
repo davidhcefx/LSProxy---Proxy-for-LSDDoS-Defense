@@ -13,8 +13,8 @@ class Client {
     struct event* write_evt;
     Connection* conn;
     Circularbuf* queued_output;  // queued output for fast-mode
-    uint64_t send_count;         // # of bytes sent by client
-    uint64_t recv_count;         // # of bytes received by client
+    uint64_t recv_count;         // # of bytes received from client
+    uint64_t send_count;         // # of bytes sent to client
     /* Slow-mode buffers */
     Filebuf* request_buf;        // buffer for a single request
     Filebuf* request_tmp_buf;    // temp buffer for overflow requests
@@ -50,6 +50,7 @@ class Client {
     }
     void release_request_history() {
         if (request_history && hybridbuf_pool.size() < MAX_HYBRID_POOL) {
+            request_history->clear();
             hybridbuf_pool.push(request_history);
         }
         request_history.reset();

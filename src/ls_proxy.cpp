@@ -234,29 +234,18 @@ void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg) {
 }
 
 void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
-    static vector<struct event*> evt_list;
-    static unordered_set<Connection*> conn_list;
-    evt_list.clear();
-    conn_list.clear();
-
-    // get unique fast-mode connections, since we only care about fast ones
-    event_base_foreach_event(evt_base, add_to_list, &evt_list);
-    for (auto evt : evt_list) {
-        if (auto conn = get_associated_conn(evt); conn && conn->is_fast_mode()) {
-            conn_list.insert(conn);
-        }
-    }
-    // check transfer rate
     const size_t target_count = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
-    for (auto conn : conn_list) {
-        auto send_c = conn->client->send_count;
+
+    // check transfer rate on fast-mode connections
+    for (auto conn : *get_all_fast_connections()) {
         auto recv_c = conn->client->recv_count;
-        if (send_c < target_count && recv_c < target_count) {
+        auto send_c = conn->client->send_count;
+        if (recv_c < target_count && send_c < target_count) {
             LOG1("[%s] Detected transfer rate < threshold! (%lu, %lu)\n", \
-                 conn->client->c_addr(), send_c, recv_c);
+                 conn->client->c_addr(), recv_c, send_c);
             conn->set_slow_mode();
         }
-        conn->client->send_count = conn->client->recv_count = 0;  // reset counter
+        conn->client->recv_count = conn->client->send_count = 0;  // reset counter
     }
 }
 
@@ -274,6 +263,34 @@ Connection* get_associated_conn(const struct event* evt) {
     } else {
         return NULL;
     }
+}
+
+const unordered_set<Connection*>* get_all_connections() {
+    static vector<struct event*> evt_list;
+    static unordered_set<Connection*> conn_list;
+    evt_list.clear();
+    conn_list.clear();
+
+    event_base_foreach_event(evt_base, add_to_list, &evt_list);
+    for (auto evt : evt_list) {
+        if (auto conn = get_associated_conn(evt))
+            conn_list.insert(conn);
+    }
+    return &conn_list;
+}
+
+const unordered_set<Connection*>* get_all_fast_connections() {
+    static vector<struct event*> evt_list;
+    static unordered_set<Connection*> conn_list;
+    evt_list.clear();
+    conn_list.clear();
+
+    event_base_foreach_event(evt_base, add_to_list, &evt_list);
+    for (auto evt : evt_list) {
+        if (auto conn = get_associated_conn(evt); conn && conn->is_fast_mode())
+            conn_list.insert(conn);
+    }
+    return &conn_list;
 }
 
 int headers_complete_cb(llhttp_t* parser) {
@@ -301,10 +318,10 @@ int message_complete_cb(llhttp_t* parser, const char* at, size_t/*len*/) {
 void abort_and_dump() {
     // make sure there are enough spaces for core dumps (~130M)
     fprintf(stderr, "Generating core dumps...\n");
-    if (auto dir = opendir("/tmp/")) {
+    if (auto dir = opendir(TMP_PREFIX)) {
         while (auto ent = readdir(dir)) {
             if (auto n = string(ent->d_name); n.starts_with("ls_proxy_buf")) {
-                unlink((string("/tmp/") + n).c_str());
+                unlink((string(TMP_PREFIX) + "/" + n).c_str());
             }
         }
         closedir(dir);
@@ -312,26 +329,57 @@ void abort_and_dump() {
     abort();
 }
 
+void help() {
+    auto print_opt = [](auto name, auto des) {
+        printf("  %-22s%s\n", name, des);
+    };
+    printf("Usage: ls_proxy [OPTIONS] <p_port> <s_host>\n");
+    print_opt("p_port", "The port of this proxy.");
+    print_opt("s_host", "The host of the server to be protected.");
+
+    printf("\nOptions:\n");
+    print_opt("-s, --s_port <port>", "The port of the server. (default=80)");
+    print_opt("-h, --help", "Display this help message.");
+}
+
 int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        printf("SYNOPSIS\n\t%s port <server_host> [server_port]\n", argv[0]);
-        printf("\tport\tThe port of this proxy.\n");
-        printf("\tserver_host\tThe host of the server to be protected.\n");
-        printf("\tserver_port\tThe port of the server. (default=80)\n");
-        return 0;
+    const char* short_opts = "s:h";
+    const struct option long_opts[] = {
+        {"s_port", 1, NULL, 's'},
+        {"help",   0, NULL, 'h'},
+    };
+    unsigned short s_port = 80;
+    char c;
+    while ((c = getopt_long(argc, argv, short_opts, long_opts, NULL)) > 0) {
+        switch (c) {
+        case 's':
+            s_port = atoi(optarg);
+            break;
+        case 'h':
+            help();
+            return 0;
+        default:
+            return 1;
+        }
     }
-    unsigned short port = atoi(argv[1]);
+    // two more positional arguments
+    if (optind + 2 > argc) {
+        help();
+        return 1;
+    }
+    unsigned short p_port = atoi(argv[optind++]);
+    const char* s_host = argv[optind++];
     Server::address = {
         .sin_family = AF_INET,
-        .sin_port = htons((argc >= 4) ? atoi(argv[3]) : 80),
-        .sin_addr = resolve_host(argv[2]),
+        .sin_port = htons(s_port),
+        .sin_addr = resolve_host(s_host),
         .sin_zero = {0},
     };
     if (!Server::test_server_alive()) return 1;
 
     // occupy fds
     raise_open_file_limit(MAX_FILE_DSC);
-    int master_sock = passive_TCP(port, true);  // fd should be 3
+    int master_sock = passive_TCP(p_port, true);  // fd should be 3
     for (int i = 0; i < MAX_HYBRID_POOL; i++) {
         hybridbuf_pool.push(make_shared<Hybridbuf>("hist"));
     }
@@ -356,7 +404,8 @@ int main(int argc, char* argv[]) {
         ERROR_EXIT("Cannot dispatch event");
     }
     LOG1("Clearing up...\n");
-    event_base_foreach_event(evt_base, close_event_fd, NULL);
+    for (auto conn : *get_all_connections()) delete conn;
     event_base_free(evt_base);
+
     return 0;
 }

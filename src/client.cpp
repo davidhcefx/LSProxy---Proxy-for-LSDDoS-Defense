@@ -6,14 +6,14 @@
 
 Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
     addr{get_host_and_port(_addr)}, conn{_conn}, queued_output{NULL},
-    send_count{0}, recv_count{0}, request_buf{NULL}, request_tmp_buf{NULL},
+    recv_count{0}, send_count{0}, request_buf{NULL}, request_tmp_buf{NULL},
     response_buf{NULL}
 {
     read_evt = new_read_event(fd, Client::on_readable, this);
     write_evt = new_write_event(fd, Client::on_writable, this);
     if (!hybridbuf_pool.empty()) {
         request_history = hybridbuf_pool.front();
-        request_history->clear();  // clear before use
+        request_history->clear();  // ensure it's clean
         hybridbuf_pool.pop();
     } else {
         request_history = make_shared<Hybridbuf>("hist");
