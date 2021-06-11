@@ -234,18 +234,30 @@ void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg) {
 }
 
 void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
-    const size_t target_count = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
+    for (auto conn : *get_all_connections()) {
+        auto recv_count = conn->client->recv_count;
+        auto send_count = conn->client->send_count;
+        const size_t min_transfer = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
+        const size_t min_download = MIN_DOWNLOAD_RATE * MONITOR_INTERVAL;
 
-    // check transfer rate on fast-mode connections
-    for (auto conn : *get_all_fast_connections()) {
-        auto recv_c = conn->client->recv_count;
-        auto send_c = conn->client->send_count;
-        if (recv_c < target_count && send_c < target_count) {
+        // drop download-too-slow connections (if it was not uploading)
+        if (send_count < min_download && recv_count < min_download) { [[unlikely]]
+            LOG1("[%s] Detected download rate too slow! (%lu)\n", \
+                 conn->client->c_addr(), send_count);
+            if (conn->client->recv_too_slow) {
+                delete conn;
+                continue;
+            }
+            conn->client->recv_too_slow = true;  // provide second chance
+        }
+        // check transfer rate (upload + download)
+        if (conn->is_fast_mode() && recv_count + send_count < min_transfer) { [[unlikely]]
             LOG1("[%s] Detected transfer rate < threshold! (%lu, %lu)\n", \
-                 conn->client->c_addr(), recv_c, send_c);
+                 conn->client->c_addr(), recv_count, send_count);
             conn->set_slow_mode();
         }
-        conn->client->recv_count = conn->client->send_count = 0;  // reset counter
+        // reset counters
+        conn->client->recv_count = conn->client->send_count = 0;
     }
 }
 
@@ -279,20 +291,6 @@ const unordered_set<Connection*>* get_all_connections() {
     return &conn_list;
 }
 
-const unordered_set<Connection*>* get_all_fast_connections() {
-    static vector<struct event*> evt_list;
-    static unordered_set<Connection*> conn_list;
-    evt_list.clear();
-    conn_list.clear();
-
-    event_base_foreach_event(evt_base, add_to_list, &evt_list);
-    for (auto evt : evt_list) {
-        if (auto conn = get_associated_conn(evt); conn && conn->is_fast_mode())
-            conn_list.insert(conn);
-    }
-    return &conn_list;
-}
-
 int headers_complete_cb(llhttp_t* parser) {
     auto h_parser = reinterpret_cast<HttpParser*>(parser->data);
     // HEAD or 304 not modified MUST NOT has body
@@ -317,11 +315,11 @@ int message_complete_cb(llhttp_t* parser, const char* at, size_t/*len*/) {
 
 void abort_and_dump() {
     // make sure there are enough spaces for core dumps (~130M)
-    fprintf(stderr, "Generating core dumps...\n");
-    if (auto dir = opendir(TMP_PREFIX)) {
+    WARNING("Generating core dumps...");
+    if (auto dir = opendir(TEMP_FOLDER)) {
         while (auto ent = readdir(dir)) {
             if (auto n = string(ent->d_name); n.starts_with("ls_proxy_buf")) {
-                unlink((string(TMP_PREFIX) + "/" + n).c_str());
+                unlink((string(TEMP_FOLDER) + "/" + n).c_str());
             }
         }
         closedir(dir);

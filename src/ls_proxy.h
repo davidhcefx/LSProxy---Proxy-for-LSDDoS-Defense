@@ -26,18 +26,37 @@
 #include <unordered_set>
 #include <algorithm>
 #include "llhttp/llhttp.h"
-#define MAX_CONNECTION    65536      // adjust according to your needs/resources
-#define MAX_HYBRID_POOL   MAX_CONNECTION / 4  // # of pre-allocated Hybridbuf
-#define SOCK_IO_BUF_SIZE  10 * 1024  // socket io buffer size (B)
-#define HIST_CACHE_SIZE   8 * 1024   // in-mem cache for request history (B)
-#define SOCK_CLOSE_WAITTIME 30       // the timeout before leaving FIN-WAIT-2
-#define MONITOR_INTERVAL    10  // the frequency of monitoring transfer rate (s)
-#define TRANSFER_RATE_THRES 1000     // transfer rate threshold (B/s)
-#define TRANS_TIMEOUT       4   // timeout before slow-mode transition finish
-#define TMP_PREFIX          "/tmp"   // temp folder prefix
-#define LOG_LEVEL_1                  // minimal info
-#define LOG_LEVEL_2                  // abundant info
-//#define LOG_LEVEL_3                  // very verbose (comment out to disable)
+/* Max concurrent connections; please adjust to your own needs/resources. */
+#define MAX_CONNECTION      65536
+
+/* # of pre-allocated Hybridbuf; connection establish speed vs. memory. */
+#define MAX_HYBRID_POOL     MAX_CONNECTION / 4
+
+/* Socket io buffer size (Bytes); speed vs. memory. */
+#define SOCK_IO_BUF_SIZE    10 * 1024
+
+/* In-memory cache for request history (Bytes); speed vs. memory. */
+#define HIST_CACHE_SIZE     8 * 1024
+
+/* The timeout before leaving TCP FIN-WAIT-2; smaller is nicer to server. */
+#define SOCK_CLOSE_WAITTIME 10
+
+/* The frequency of transfer rate monitoring (s). */
+#define MONITOR_INTERVAL    10
+
+/* Upload + download rate threshold for staying in fast-mode (Bytes/s). */
+#define TRANSFER_RATE_THRES 2 * 1024
+
+/* Minimal required download rate when receving responses (Bytes/s); currently
+   this is the only way to defend Read attacks, so set to a higher value. */
+#define MIN_DOWNLOAD_RATE   100
+
+/* The timeout before slow-mode transition complete. */
+#define TRANS_TIMEOUT       3
+#define TEMP_FOLDER         "/tmp"
+#define LOG_LEVEL_1         // minimal info
+#define LOG_LEVEL_2         // abundant info
+// #define LOG_LEVEL_3         // very verbose (comment out to disable)
 /* Don't modify below this line */
 #define MAX_FILE_DSC      7 * MAX_CONNECTION + 7  // see FILE_DESCRIPTORS
 #define MAX_REQUEST_SIZE  UINT64_MAX              // currently no enforcement
@@ -60,10 +79,12 @@
 #define LOG3(...)         {}
 #endif  // LOG_LEVEL_3
 #define WARNING(fmt, ...) \
-    { fprintf(stderr, "[Warning] " fmt "\n" __VA_OPT__(,) __VA_ARGS__); }
+    { fflush(stdout); \
+      fprintf(stderr, "[Warning] " fmt "\n" __VA_OPT__(,) __VA_ARGS__); }
 #define ERROR(fmt, ...)   \
-    { fprintf(stderr, "[Error] " fmt ": %s (%s:%d)\n" __VA_OPT__(,) \
-              __VA_ARGS__, strerror(errno), __FILE__, __LINE__); }
+    { fflush(stdout); \
+      fprintf(stderr, "[Error] " fmt ": %s (%s:%d)\n" __VA_OPT__(,) __VA_ARGS__, \
+              strerror(errno), __FILE__, __LINE__); }
 #define ERROR_EXIT(...)   { ERROR(__VA_ARGS__); ABORT(); }
 void abort_and_dump();
 #define ABORT()           { abort_and_dump(); }
@@ -86,11 +107,12 @@ using std::swap;
  *     for storing temporary data that cannot be forwarded.
  * [Slow mode] In slow-mode, we buffer incomplete requests and forward them
  *     one at a time. We receive server's response at full speed, and close
- *     the connection as soon as it finished.
+ *     the connection as soon as it's finished. We also impose a rate limit
+ *     to cut off downloads that are too slow.
  *     > Use event-based architecture to prevent proxy itself from LSDDoS.
  *     > Reduce memory usage so that we can endure a lot of slow connections.
- *     > [Future work] If it was static response and we were on the same host,
- *       one optimization is to read file directly.
+ *     > [Future work] To defend Read attacks, one way is to detect identical
+ *       bodies through E-Tag or similar header fields, and utilize caching.
  * [Monitor] We monitor transfer-rate periodically, either in every certain
  *     amount of time or when certain amount of bytes received. (The period
  *     should be short, for it opens up a window for DoS attack)
@@ -114,6 +136,14 @@ using std::swap;
  *   Filebuf for slow buffers (0-4 per conn)        4n
  *   Total:                                     7n + 7
  *
+ * MEMORY_USAGE:
+ *   Client:
+ *     - queued_output: SOCK_IO_BUF_SIZE
+ *     - request_history: HIST_CACHE_SIZE
+ *   Server:
+ *     - queued_output: SOCK_IO_BUF_SIZE
+ *   Total: MAX_CONNECTION * (2 * SOCK_IO_BUF_SIZE + HIST_CACHE_SIZE)
+ * 
  * PROGRESS:
  * [x] Event-based arch.
  * [x] Fast-mode
@@ -123,6 +153,7 @@ using std::swap;
  * [x] Transition logic
  * [x] Detect server down
  * [ ] Shorter keep-alive timeout
+ * [ ] Read defense (caching)
  * [ ] TLS support
  * [ ] IPv6 support
  * [ ] HTTP/2.0 support
@@ -257,7 +288,6 @@ int close_event_fd(const struct event_base*, const struct event*, void*);
 // get associated Connection ptr or NULL
 Connection* get_associated_conn(const struct event* evt);
 const unordered_set<Connection*>* get_all_connections();
-const unordered_set<Connection*>* get_all_fast_connections();
 
 /******************* Parser callbacks ********************/
 int headers_complete_cb(llhttp_t* parser);

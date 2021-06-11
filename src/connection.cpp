@@ -14,16 +14,16 @@ void Connection::set_slow_mode() {
     client->response_buf = new FIFOfilebuf("response_buf");
     if (!parser) {  // parser & server not created
         parser = new HttpParser();
-        client->pause_rw();
+        client->pause_r();
         /* history must be empty since no request had been sent */
         client->release_request_history();
-        client->resume_rw();
+        client->resume_r();
         set_transition_done();
         return;
     }
 
     // pause client, wait until server finished its msg then close server
-    client->pause_rw();
+    client->pause_r();
     add_event_with_timeout(server->read_evt, TRANS_TIMEOUT);
     if (server->queued_output->data_size() > 0) { [[unlikely]]
         add_event(server->write_evt);

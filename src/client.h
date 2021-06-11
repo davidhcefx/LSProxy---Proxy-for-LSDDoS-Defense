@@ -13,12 +13,14 @@ class Client {
     struct event* write_evt;
     Connection* conn;
     Circularbuf* queued_output;  // queued output for fast-mode
-    uint64_t recv_count;         // # of bytes received from client
-    uint64_t send_count;         // # of bytes sent to client
     /* Slow-mode buffers */
     Filebuf* request_buf;        // buffer for a single request
     Filebuf* request_tmp_buf;    // temp buffer for overflow requests
     FIFOfilebuf* response_buf;   // buffer for responses
+    /* Transfer rate */
+    uint64_t recv_count;         // # of bytes received from client
+    uint64_t send_count;         // # of bytes sent to client
+    bool recv_too_slow;          // recv rate < MIN_DOWNLOAD_RATE
 
     // create the events and allocate Hybridbuf
     Client(int fd, const struct sockaddr_in& _addr, Connection* _conn);
@@ -37,9 +39,12 @@ class Client {
         start_send();
         LOG3("[%s] Client been set to reply-only mode.\n", c_addr());
     }
-    // TODO(davidhcefx): maybe we could enable send at the same time?
-    void pause_rw() { stop_recv(); stop_send(); LOG3("[%s] Paused.\n", c_addr()); }
-    void resume_rw() { start_recv(); start_send(); LOG3("[%s] Resumed.\n", c_addr()); }
+    void pause_r() { stop_recv(); LOG3("[%s] Paused.\n", c_addr()); }
+    void resume_r() { start_recv(); LOG3("[%s] Resumed.\n", c_addr()); }
+    void stop_recv() { del_event(read_evt); }
+    void stop_send() { del_event(write_evt); }
+    void start_recv() { add_event(read_evt); }
+    void start_send() { add_event(write_evt); }
     // keep track of incomplete requests; throw ParserError
     void keep_track_request_history(const char* data, size_t size);
     void copy_history_to(Filebuf* filebuf) {
@@ -60,11 +65,6 @@ class Client {
 
  private:
     shared_ptr<Hybridbuf> request_history;
-
-    void stop_recv() { del_event(read_evt); }
-    void stop_send() { del_event(write_evt); }
-    void start_recv() { add_event(read_evt); }
-    void start_send() { add_event(write_evt); }
 };
 
 #endif  // SRC_CLIENT_H_

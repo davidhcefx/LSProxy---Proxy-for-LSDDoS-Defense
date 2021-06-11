@@ -34,7 +34,8 @@ void Server::recv_to_buffer_slowly(int fd) {
     auto client = conn->client;
     auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
     client->response_buf->store(global_buffer, stat.nbytes);
-    LOG2("[%s] %9s| response <<<< %-6lu [SERVER]\n", client->c_addr(), "", \
+    client->start_send();
+    LOG2("[%s] %9s[ response <<<< %-6lu [SERVER]\n", client->c_addr(), "", \
          stat.nbytes);
     try {
         conn->parser->do_parse(global_buffer, stat.nbytes);
@@ -55,7 +56,7 @@ void Server::recv_to_buffer_slowly(int fd) {
         // resume client
         conn->free_server();
         conn->parser->switch_to_request_mode();
-        client->resume_rw();
+        client->resume_r();
     }
 }
 
@@ -67,10 +68,10 @@ void Server::send_request_slowly(int fd) {
         if (stat.nbytes < (size_t)count) { [[unlikely]]
             client->request_buf->rewind(count - stat.nbytes);
         }
-        LOG2("[%s] %9s| request >>>> %-6lu [SERVER]\n", client->c_addr(), "", \
+        LOG2("[%s] %9s[ request >>>> %-6lu [SERVER]\n", client->c_addr(), "", \
              stat.nbytes);
     } else if (count == 0) {  // done forwarding
-        LOG2("[%s] %9s| request >>>> %-6s [SERVER]\n", client->c_addr(), "", "0");
+        LOG2("[%s] %9s[ request >>>> %-6s [SERVER]\n", client->c_addr(), "", "0");
         del_event(write_evt);
         // move data back from request_tmp_buf
         swap(client->request_buf, client->request_tmp_buf);
@@ -90,18 +91,19 @@ void Server::on_readable(int fd, short flag, void* arg) {
         if (flag & EV_TIMEOUT) {  // timed out (no packets for a while)
             conn->set_transition_done();
             conn->free_server();
-            client->resume_rw();
+            client->resume_r();
         } else {
             // store to response buffer
             auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
             if (stat.has_eof) {  // server closed
                 conn->set_transition_done();
                 conn->free_server();
-                client->resume_rw();
+                client->resume_r();
                 return;
             }
             client->response_buf->store(global_buffer, stat.nbytes);
-            LOG2("[%s] %9s| response <<<< %-6lu [SERVER]\n", client->c_addr(), \
+            client->start_send();
+            LOG2("[%s] %9s[ response <<<< %-6lu [SERVER]\n", client->c_addr(), \
                  "", stat.nbytes);
         }
     } else {

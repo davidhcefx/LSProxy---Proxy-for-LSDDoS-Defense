@@ -2,7 +2,7 @@
 
 
 Filebuf::Filebuf(const char* alias): data_size{0} {
-    char name[] = TMP_PREFIX "/ls_proxy_buf_XXXXXX";
+    char name[] = TEMP_FOLDER "/ls_proxy_buf_XXXXXX";
     if ((fd = mkstemp(name)) < 0) { [[unlikely]]
         ERROR_EXIT("Cannot mkstemp");
     }

@@ -2,12 +2,14 @@
 #include "client.h"
 #include "server.h"
 #include "connection.h"
+// newbie first pass guarantee
+#define COUNTER_INIT  TRANSFER_RATE_THRES * MONITOR_INTERVAL
 
 
 Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
     addr{get_host_and_port(_addr)}, conn{_conn}, queued_output{NULL},
-    recv_count{0}, send_count{0}, request_buf{NULL}, request_tmp_buf{NULL},
-    response_buf{NULL}
+    request_buf{NULL}, request_tmp_buf{NULL}, response_buf{NULL},
+    recv_count{COUNTER_INIT}, send_count{COUNTER_INIT}, recv_too_slow{false}
 {
     read_evt = new_read_event(fd, Client::on_readable, this);
     write_evt = new_write_event(fd, Client::on_writable, this);
@@ -37,7 +39,7 @@ Client::~Client() {
 
 void Client::recv_to_buffer_slowly(int fd) {
     auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
-    LOG2("[%s] %6lu >>>> request |\n", c_addr(), stat.nbytes);
+    LOG2("[%s] %6lu >>>> request ]\n", c_addr(), stat.nbytes);
     if (stat.has_eof) {  // client closed
         delete conn;
         return;
@@ -64,7 +66,7 @@ void Client::recv_to_buffer_slowly(int fd) {
             request_tmp_buf->store(end_ptr, stat.nbytes - part1_size);
         }
         // pause client, rewind buffers and interact with server
-        pause_rw();
+        pause_r();
         request_buf->rewind();  // for further reads
         conn->parser->switch_to_response_mode();
         try {
@@ -88,9 +90,9 @@ void Client::send_response_slowly(int fd) {
         if (stat.nbytes < (size_t)count) [[unlikely]] {
             response_buf->rewind(count - stat.nbytes);
         }
-        LOG2("[%s] %6lu <<<< response |\n", c_addr(), stat.nbytes);
+        LOG2("[%s] %6lu <<<< response ]\n", c_addr(), stat.nbytes);
     } else if (count == 0) {  // no data to forward
-        LOG2("[%s] %6s <<<< response |\n", c_addr(), "0");
+        LOG2("[%s] %6s <<<< response ]\n", c_addr(), "0");
         del_event(write_evt);
         if (!conn->parser) {  // parser freed (reply-only mode)
             delete conn;
