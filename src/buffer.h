@@ -45,7 +45,7 @@ class Filebuf {
         if (count < 0) { [[unlikely]]
             ERROR("Read failed (#%d)", fd);
         }
-        LOG2("File #%d: Read %lu bytes.\n", fd, count);
+        LOG3("File #%d: Read %lu bytes.\n", fd, count);
         return count;
     }
 };

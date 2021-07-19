@@ -239,21 +239,19 @@ void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
         auto send_count = conn->client->send_count;
         const size_t min_transfer = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
         const size_t min_download = MIN_DOWNLOAD_RATE * MONITOR_INTERVAL;
+        LOG3("[%s] Download %lu, Upload %lu\n", conn->client->c_addr(), send_count, recv_count);
 
         // drop download-too-slow connections (if it was not uploading)
         if (send_count < min_download && recv_count < min_download) { [[unlikely]]
             LOG1("[%s] Detected download rate too slow! (%lu)\n", \
                  conn->client->c_addr(), send_count);
-            if (conn->client->recv_too_slow) {
-                delete conn;
-                continue;
-            }
-            conn->client->recv_too_slow = true;  // provide second chance
+            delete conn;
+            continue;
         }
         // check transfer rate (upload + download)
         if (conn->is_fast_mode() && recv_count + send_count < min_transfer) { [[unlikely]]
             LOG1("[%s] Detected transfer rate < threshold! (%lu, %lu)\n", \
-                 conn->client->c_addr(), recv_count, send_count);
+                 conn->client->c_addr(), send_count, recv_count);
             conn->set_slow_mode();
         }
         // reset counters
@@ -374,10 +372,12 @@ int main(int argc, char* argv[]) {
         .sin_zero = {0},
     };
     if (!Server::test_server_alive()) return 1;
+    LOG1("ls_proxy starting up...\n");
 
     // occupy fds
     raise_open_file_limit(MAX_FILE_DSC);
     int master_sock = passive_TCP(p_port, true);  // fd should be 3
+    LOG2("Allocating %d hybridbufs...\n", MAX_HYBRID_POOL);
     for (int i = 0; i < MAX_HYBRID_POOL; i++) {
         hybridbuf_pool.push(make_shared<Hybridbuf>("hist"));
     }

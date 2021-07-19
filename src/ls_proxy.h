@@ -41,7 +41,9 @@
 /* The timeout before leaving TCP FIN-WAIT-2; smaller is nicer to server. */
 #define SOCK_CLOSE_WAITTIME 10
 
-/* The frequency of transfer rate monitoring (s). */
+/* The frequency of transfer rate monitoring (s); the shorter the more false
+   positives due to TCP buffering, while the longer increase the chance of
+   reaching server's capacity. */
 #define MONITOR_INTERVAL    10
 
 /* Upload + download rate threshold for staying in fast-mode (Bytes/s). */

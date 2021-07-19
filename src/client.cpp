@@ -9,7 +9,7 @@
 Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
     addr{get_host_and_port(_addr)}, conn{_conn}, queued_output{NULL},
     request_buf{NULL}, request_tmp_buf{NULL}, response_buf{NULL},
-    recv_count{COUNTER_INIT}, send_count{COUNTER_INIT}, recv_too_slow{false}
+    recv_count{COUNTER_INIT}, send_count{COUNTER_INIT}
 {
     read_evt = new_read_event(fd, Client::on_readable, this);
     write_evt = new_write_event(fd, Client::on_writable, this);

@@ -20,7 +20,6 @@ class Client {
     /* Transfer rate */
     uint64_t recv_count;         // # of bytes received from client
     uint64_t send_count;         // # of bytes sent to client
-    bool recv_too_slow;          // recv rate < MIN_DOWNLOAD_RATE
 
     // create the events and allocate Hybridbuf
     Client(int fd, const struct sockaddr_in& _addr, Connection* _conn);

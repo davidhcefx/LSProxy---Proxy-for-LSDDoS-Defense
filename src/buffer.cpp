@@ -48,7 +48,7 @@ void Filebuf::_file_write(const char* data, size_t size) {
         WARNING("%lu bytes could not be written and were lost", remain);
     }
     data_size += size - remain;
-    LOG2("File #%d: Wrote %lu bytes.\n", fd, size - remain);
+    LOG3("File #%d: Wrote %lu bytes.\n", fd, size - remain);
 }
 
 /* ========================================================================= */
@@ -93,7 +93,7 @@ size_t Hybridbuf::_buf_write(const char* data, size_t size) {
         memcpy(buffer + next_pos, data, size);
         next_pos += size;
         data_size += size;
-        LOG2("Mem-buf #%d: Occupied %lu / %lu bytes.\n", fd, size, space);
+        LOG3("Mem-buf #%d: Occupied %lu / %lu bytes.\n", fd, size, space);
         return size;
     } else {
         return 0;
@@ -105,7 +105,7 @@ size_t Hybridbuf::_buf_read(char* result, size_t max_size) {
         size = min(size, max_size);  // restricted by max_size
         memcpy(result, buffer + next_pos, size);
         next_pos += size;
-        LOG2("Mem-buf #%d: Read %lu bytes\n", fd, size);
+        LOG3("Mem-buf #%d: Read %lu bytes\n", fd, size);
         return size;
     } else {
         return 0;
