@@ -41,17 +41,18 @@
 /* The timeout before leaving TCP FIN-WAIT-2; smaller is nicer to server. */
 #define SOCK_CLOSE_WAITTIME 10
 
-/* The frequency of transfer rate monitoring (s); the shorter the more false
+/* The frequency of data rates monitoring (s); the shorter the more false
    positives due to TCP buffering, while the longer increase the chance of
    reaching server's capacity. */
 #define MONITOR_INTERVAL    10
 
-/* Upload + download rate threshold for staying in fast-mode (Bytes/s). */
-#define TRANSFER_RATE_THRES 2 * 1024
+/* Data transfer rate threshold (download + upload) for a connection to remain
+   in fast-mode (B/s). */
+#define DTR_THRESHOLD       2 * 1024
 
-/* Minimal required download rate when receving responses (Bytes/s); currently
-   this is the only way to defend Read attacks, so set to a higher value. */
-#define MIN_DOWNLOAD_RATE   100
+/* Minimally required download speed when client is reading (B/s); currently
+   this is the only way to defend read attacks, so set to a higher value. */
+#define MIN_DOWNLOAD_SPEED  100
 
 /* The timeout before slow-mode transition complete. */
 #define TRANS_TIMEOUT       3
@@ -109,16 +110,16 @@ using std::swap;
  *     for storing temporary data that cannot be forwarded.
  * [Slow mode] In slow-mode, we buffer incomplete requests and forward them
  *     one at a time. We receive server's response at full speed, and close
- *     the connection as soon as it's finished. We also impose a rate limit
+ *     the connection as soon as it's finished. We also impose a speed limit
  *     to cut off downloads that are too slow.
  *     > Use event-based architecture to prevent proxy itself from LSDDoS.
  *     > Reduce memory usage so that we can endure a lot of slow connections.
- *     > [Future work] To defend Read attacks, one way is to detect identical
+ *     > [Future work] To defend read attacks, one way is to detect identical
  *       bodies through E-Tag or similar header fields, and utilize caching.
- * [Monitor] We monitor transfer-rate periodically, either in every certain
- *     amount of time or when certain amount of bytes received. (The period
- *     should be short, for it opens up a window for DoS attack)
- *     > [Future work] Monitor more metrics for better accuracy.
+ * [Monitor] We monitor data rates periodically, either in every certain amount
+ *     of time or when certain amount of bytes received. (The period should
+ *     be short, for it opens up a window for DoS attack)
+ *     > [Future work] Better detection metrics other than DTR?
  * [Transition] When we find a connection suspicious, we first stop collecting
  *     further requests, then close server connection after a short delay in
  *     case there are remaining responses. After switching to slow-mode, we
@@ -151,7 +152,7 @@ using std::swap;
  * [x] Fast-mode
  * [x] History temp
  * [x] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
- * [x] Transfer rate monitor
+ * [x] Date rates monitor
  * [x] Transition logic
  * [x] Detect server down
  * [ ] Shorter keep-alive timeout
@@ -283,8 +284,8 @@ void put_all_connection_slow_mode(int/*sig*/);
 int add_to_list(const struct event_base*, const struct event* evt, void* arg);
 // timer callback; scan a list of events and put them to slow-mode
 void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg);
-// check transfer rate of all clients, and put suspicious ones to slow-mode
-void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/);
+// check data rates on each connection; set to slow-mode or drop if detected.
+void monitor_data_rates(int/*fd*/, short/*flag*/, void*/*arg*/);
 // close each event's fd
 int close_event_fd(const struct event_base*, const struct event*, void*);
 // get associated Connection ptr or NULL

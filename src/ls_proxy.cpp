@@ -233,24 +233,24 @@ void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg) {
     delete t_arg;
 }
 
-void monitor_transfer_rate(int/*fd*/, short/*flag*/, void*/*arg*/) {
+void monitor_data_rates(int/*fd*/, short/*flag*/, void*/*arg*/) {
     for (auto conn : *get_all_connections()) {
         auto recv_count = conn->client->recv_count;
         auto send_count = conn->client->send_count;
-        const size_t min_transfer = TRANSFER_RATE_THRES * MONITOR_INTERVAL;
-        const size_t min_download = MIN_DOWNLOAD_RATE * MONITOR_INTERVAL;
+        const size_t min_dtr = DTR_THRESHOLD * MONITOR_INTERVAL;
+        const size_t min_down = MIN_DOWNLOAD_SPEED * MONITOR_INTERVAL;
         LOG3("[%s] Download %lu, Upload %lu\n", conn->client->c_addr(), send_count, recv_count);
 
         // drop download-too-slow connections (if it was not uploading)
-        if (send_count < min_download && recv_count < min_download) { [[unlikely]]
-            LOG1("[%s] Detected download rate too slow! (%lu)\n", \
+        if (send_count < min_down && recv_count < min_down) { [[unlikely]]
+            LOG1("[%s] Detected download speed too slow! (%lu)\n", \
                  conn->client->c_addr(), send_count);
             delete conn;
             continue;
         }
-        // check transfer rate (upload + download)
-        if (conn->is_fast_mode() && recv_count + send_count < min_transfer) { [[unlikely]]
-            LOG1("[%s] Detected transfer rate < threshold! (%lu, %lu)\n", \
+        // check data transfer rate (upload + download)
+        if (conn->is_fast_mode() && recv_count + send_count < min_dtr) { [[unlikely]]
+            LOG1("[%s] Detected data transfer rate < threshold! (%lu, %lu)\n", \
                  conn->client->c_addr(), send_count, recv_count);
             conn->set_slow_mode();
         }
@@ -396,7 +396,7 @@ int main(int argc, char* argv[]) {
     }
 
     evt_base = event_base_new();
-    add_event_with_timeout(new_persist_timer(monitor_transfer_rate), MONITOR_INTERVAL);
+    add_event_with_timeout(new_persist_timer(monitor_data_rates), MONITOR_INTERVAL);
     add_event(new_read_event(master_sock, Connection::accept_new));
     if (event_base_dispatch(evt_base) < 0) {  /* blocks here */
         ERROR_EXIT("Cannot dispatch event");

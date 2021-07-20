@@ -3,7 +3,7 @@
 #include "server.h"
 #include "connection.h"
 // newbie first pass guarantee
-#define COUNTER_INIT  TRANSFER_RATE_THRES * MONITOR_INTERVAL
+#define COUNTER_INIT  (DTR_THRESHOLD + MIN_DOWNLOAD_SPEED) * MONITOR_INTERVAL
 
 
 Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
