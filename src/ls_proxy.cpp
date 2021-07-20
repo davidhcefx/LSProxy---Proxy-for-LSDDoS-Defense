@@ -235,27 +235,27 @@ void put_events_slow_mode(int/*fd*/, short/*flag*/, void* arg) {
 
 void monitor_data_rates(int/*fd*/, short/*flag*/, void*/*arg*/) {
     for (auto conn : *get_all_connections()) {
-        auto recv_count = conn->client->recv_count;
-        auto send_count = conn->client->send_count;
+        auto read_count = conn->client->read_count;
+        auto write_count = conn->client->write_count;
         const size_t min_dtr = DTR_THRESHOLD * MONITOR_INTERVAL;
         const size_t min_down = MIN_DOWNLOAD_SPEED * MONITOR_INTERVAL;
-        LOG3("[%s] Download %lu, Upload %lu\n", conn->client->c_addr(), send_count, recv_count);
+        LOG3("[%s] Download %lu, Upload %lu\n", conn->client->c_addr(), write_count, read_count);
 
         // drop download-too-slow connections (if it was not uploading)
-        if (send_count < min_down && recv_count < min_down) { [[unlikely]]
+        if (write_count < min_down && read_count < min_down) { [[unlikely]]
             LOG1("[%s] Detected download speed too slow! (%lu)\n", \
-                 conn->client->c_addr(), send_count);
+                 conn->client->c_addr(), write_count);
             delete conn;
             continue;
         }
         // check data transfer rate (upload + download)
-        if (conn->is_fast_mode() && recv_count + send_count < min_dtr) { [[unlikely]]
+        if (conn->is_fast_mode() && read_count + write_count < min_dtr) { [[unlikely]]
             LOG1("[%s] Detected data transfer rate < threshold! (%lu, %lu)\n", \
-                 conn->client->c_addr(), send_count, recv_count);
+                 conn->client->c_addr(), write_count, read_count);
             conn->set_slow_mode();
         }
         // reset counters
-        conn->client->recv_count = conn->client->send_count = 0;
+        conn->client->read_count = conn->client->write_count = 0;
     }
 }
 

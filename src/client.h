@@ -17,9 +17,9 @@ class Client {
     Filebuf* request_buf;        // buffer for a single request
     Filebuf* request_tmp_buf;    // temp buffer for overflow requests
     FIFOfilebuf* response_buf;   // buffer for responses
-    /* Transfer rate */
-    uint64_t recv_count;         // # of bytes received from client
-    uint64_t send_count;         // # of bytes sent to client
+    /* Counters */
+    uint64_t read_count;         // # of bytes read from client
+    uint64_t write_count;        // # of bytes write to client
 
     // create the events and allocate Hybridbuf
     Client(int fd, const struct sockaddr_in& _addr, Connection* _conn);
@@ -34,16 +34,13 @@ class Client {
     // disable further receiving and only reply msg
     void set_reply_only_mode() {
         // TODO(davidhcefx): use Filebuf or set timeout to prevent read attack
-        stop_recv();
-        start_send();
+        del_event(read_evt);
+        add_event(write_evt);
         LOG3("[%s] Client been set to reply-only mode.\n", c_addr());
     }
-    void pause_r() { stop_recv(); LOG3("[%s] Paused.\n", c_addr()); }
-    void resume_r() { start_recv(); LOG3("[%s] Resumed.\n", c_addr()); }
-    void stop_recv() { del_event(read_evt); }
-    void stop_send() { del_event(write_evt); }
-    void start_recv() { add_event(read_evt); }
-    void start_send() { add_event(write_evt); }
+    // pause reading from client
+    void pause_r() { del_event(read_evt); LOG3("[%s] Paused.\n", c_addr()); }
+    void resume_r() { add_event(read_evt); LOG3("[%s] Resumed.\n", c_addr()); }
     // keep track of incomplete requests; throw ParserError
     void keep_track_request_history(const char* data, size_t size);
     void copy_history_to(Filebuf* filebuf) {
