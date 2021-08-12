@@ -1,0 +1,27 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+# No configure program yet...
+#     - name: configure
+#       run: ./configure
+
+    - name: Lowers MAX_CONNECTION to cope with CI's limitation
+      run: sed -i -E 's/^(#define +MAX_CONNECTION).*/\1 9360/' src/ls_proxy.h
+
+    - name: make
+      run: make
+
+    - name: Test
+      run: make test

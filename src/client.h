@@ -34,13 +34,17 @@ class Client {
     // disable further receiving and only reply msg
     void set_reply_only_mode() {
         // TODO(davidhcefx): use Filebuf or set timeout to prevent read attack
-        del_event(read_evt);
-        add_event(write_evt);
+        stop_reading();
+        start_writing();
         LOG3("[%s] Client been set to reply-only mode.\n", c_addr());
     }
+    void stop_reading() { del_event(read_evt); }
+    void stop_writing() { del_event(write_evt); }
+    void start_reading() { add_event(read_evt); }
+    void start_writing() { add_event(write_evt); }
     // pause reading from client
-    void pause_r() { del_event(read_evt); LOG3("[%s] Paused.\n", c_addr()); }
-    void resume_r() { add_event(read_evt); LOG3("[%s] Resumed.\n", c_addr()); }
+    void pause_r() { stop_reading(); LOG3("[%s] Paused.\n", c_addr()); }
+    void resume_r() { start_reading(); LOG3("[%s] Resumed.\n", c_addr()); }
     // keep track of incomplete requests; throw ParserError
     void keep_track_request_history(const char* data, size_t size);
     void copy_history_to(Filebuf* filebuf) {

@@ -34,7 +34,7 @@ void Server::recv_to_buffer_slowly(int fd) {
     auto client = conn->client;
     auto stat = read_all(fd, global_buffer, sizeof(global_buffer));
     client->response_buf->store(global_buffer, stat.nbytes);
-    client->start_send();
+    client->start_writing();
     LOG2("[%s] %9s[ response <<<< %-6lu [SERVER]\n", client->c_addr(), "", \
          stat.nbytes);
     try {
@@ -102,7 +102,7 @@ void Server::on_readable(int fd, short flag, void* arg) {
                 return;
             }
             client->response_buf->store(global_buffer, stat.nbytes);
-            client->start_send();
+            client->start_writing();
             LOG2("[%s] %9s[ response <<<< %-6lu [SERVER]\n", client->c_addr(), \
                  "", stat.nbytes);
         }
