@@ -89,7 +89,7 @@
       fprintf(stderr, "[Error] " fmt ": %s (%s:%d)\n" __VA_OPT__(,) __VA_ARGS__, \
               strerror(errno), __FILE__, __LINE__); }
 #define ERROR_EXIT(...)   { ERROR(__VA_ARGS__); ABORT(); }
-void abort_and_dump();
+[[noreturn]] void abort_and_dump();
 #define ABORT()           { abort_and_dump(); }
 using std::string;
 using std::to_string;

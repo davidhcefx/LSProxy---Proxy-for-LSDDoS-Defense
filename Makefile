@@ -62,7 +62,10 @@ check_limit:
 shorten_timeout:
 	./utils/shorten_connection_timeout.sh
 
-clean:
+clean-test:
+	make -C test clean
+
+clean: clean-test
 	rm -f simple_attack ls_proxy core*
 
 .PHONY: all test g++9 libevent check_limit shorten_timeout clean
