@@ -149,7 +149,7 @@ void Client::on_writable(int fd, short/*flag*/, void* arg) {
                 delete conn;
             }
         } else {
-            // add back server's recv because we removed it before
+            // add back server's read because we removed it before
             add_event(conn->server->read_evt);
             del_event(client->write_evt);
             // write some

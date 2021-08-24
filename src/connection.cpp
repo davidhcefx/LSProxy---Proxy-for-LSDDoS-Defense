@@ -69,7 +69,7 @@ void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
         return;
     }
     if (stat_s.nbytes == 0) { [[unlikely]]  // server unwritable
-        // disable client's recv temporarily
+        // disable client's read temporarily
         del_event(client->read_evt);
         add_event(server->write_evt);
         LOG2("[%s] Server temporarily unwritable.\n", client->c_addr());
@@ -94,7 +94,7 @@ void Connection::fast_forward(Server*/*server*/, Client*/*client*/) {
         return;
     }
     if (stat_c.nbytes == 0) { [[unlikely]]  // client unwritable
-        // disable server's recv temporily
+        // disable server's read temporily
         del_event(server->read_evt);
         add_event(client->write_evt);
         LOG2("[%s] Client temporarily unwritable.\n", client->c_addr());
