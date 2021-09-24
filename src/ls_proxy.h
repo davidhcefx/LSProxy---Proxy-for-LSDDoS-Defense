@@ -60,7 +60,8 @@
 #define LOG_LEVEL_1         // minimal info
 #define LOG_LEVEL_2         // abundant info
 // #define LOG_LEVEL_3         // very verbose (comment out to disable)
-/* Don't modify below this line */
+
+/******************* Don't modify below this line *******************/
 #define MAX_FILE_DSC      7 * MAX_CONNECTION + 7  // see FILE_DESCRIPTORS
 #define MAX_REQUEST_SIZE  UINT64_MAX              // currently no enforcement
 #define MAX_RESPONSE_SIZE UINT64_MAX
@@ -162,7 +163,6 @@ using std::swap;
  * [ ] HTTP/2.0 support
  */
 
-
 class Filebuf;
 class Hybridbuf;
 class FIFOfilebuf;
@@ -172,10 +172,10 @@ class Server;
 class Connection;
 class ParserError: public exception {};
 class ConnectionError: public exception {};
-
 extern struct event_base* evt_base;
 extern char global_buffer[SOCK_IO_BUF_SIZE];
 extern queue<shared_ptr<Hybridbuf>> hybridbuf_pool;
+
 
 /* Struct for storing read/write return values */
 struct io_stat {

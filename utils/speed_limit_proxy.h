@@ -45,21 +45,23 @@ using std::swap;
 /**
  * Proxy for imposing TCP speed limit. That is, for every connection, the
  * I/O stream passing through this proxy would not exceed certain speed limit.
+ * (Except under special conditions, such as server A being temporarily
+ * unwritable, causing the queue to pile up some data; when A becomes writable
+ * again, the sudden speed would be at most `max_speed + SOCK_IO_BUF_SIZE`,
+ * which might exceed the limit.)
  */
-
 
 class Circularbuf;
 class Client;
 class Server;
 class Connection;
 class ConnectionError: public exception {};
+extern struct event_base* evt_base;
+extern char global_buffer[SOCK_IO_BUF_SIZE];
 void add_event(struct event* evt, const struct timeval* timeout = NULL);
 void del_event(struct event* evt);
 void free_event(struct event* evt);
 
-extern struct event_base* evt_base;
-extern char global_buffer[SOCK_IO_BUF_SIZE];
-extern struct sockaddr_in server_addr;
 
 /* Struct for storing read/write return values */
 struct io_stat {
@@ -70,7 +72,7 @@ struct io_stat {
 };
 
 
-// Class for handling client I/O.
+/* Class for handling client I/O. */
 class Client {
  public:
     string addr;
@@ -93,9 +95,11 @@ class Client {
     static void on_writable(int fd, short/*flag*/, void* arg);
 };
 
-// Class for handling server I/O.
+
+/* Class for handling server I/O. */
 class Server {
  public:
+    static struct sockaddr_in address;  // the server to connect to
     struct event* read_evt;  // both events have ptr keeping track of *this
     struct event* write_evt;
     Connection* conn;
@@ -114,18 +118,23 @@ class Server {
     static void on_writable(int fd, short/*flag*/, void* arg);
 };
 
+
 // Class for handling client-server interactions.
 class Connection {
  public:
+    static int64_t max_speed;  // I/O stream max speed (B/s)
     Client* client;
     Server* server;
-    uint64_t c2s_count;     // # of bytes sent from client to server
-    uint64_t s2c_count;     // # of bytes sent from server to client
+    int64_t c2s_quota;  // how many more bytes could be sent to server
+    int64_t s2c_quota;  // how many more bytes could be sent to client
 
     // connects to server; throw ConnectionError
     Connection(int client_fd, const struct sockaddr_in& addr):
-        client{new Client(client_fd, addr, this)}, server{new Server(this)},
-        c2s_count{0}, s2c_count{0} {}
+        client{new Client(client_fd, addr, this)}, server{new Server(this)}
+    {
+        assert(max_speed > 0);
+        c2s_quota = s2c_quota = max_speed;  // max_speed * 1sec
+    }
     ~Connection() {
         delete client;
         delete server;

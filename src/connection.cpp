@@ -74,6 +74,9 @@ void Connection::fast_forward(Client*/*client*/, Server*/*server*/) {
         add_event(server->write_evt);
         LOG2("[%s] Server temporarily unwritable.\n", client->c_addr());
     }
+    /* TODO(davidhcefx): Some data might be stuck in the queue.
+        Eg. The pipe between A and B (A)-===-(B) , when A has no water, there
+        might be some water remaining in the pipe. */
 }
 
 void Connection::fast_forward(Server*/*server*/, Client*/*client*/) {

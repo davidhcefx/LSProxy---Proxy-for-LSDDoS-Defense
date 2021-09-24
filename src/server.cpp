@@ -116,7 +116,7 @@ void Server::on_writable(int fd, short/*flag*/, void* arg) {
     auto conn = server->conn;
     auto client = conn->client;
     if (conn->is_fast_mode()) {
-        // add back client's read because we removed it before
+        // re-enable client's read because we disabled it before
         add_event(client->read_evt);
         del_event(server->write_evt);
         // write some

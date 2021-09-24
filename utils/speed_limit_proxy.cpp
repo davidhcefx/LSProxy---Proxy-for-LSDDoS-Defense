@@ -4,22 +4,20 @@
 
 struct event_base* evt_base;
 char global_buffer[SOCK_IO_BUF_SIZE];  // buffer for each read operation
-struct sockaddr_in server_addr;
+/* class variables */
+struct sockaddr_in Server::address;
+int64_t Connection::max_speed;
 
 
-// forward every packets
-// record counters (actually written ones)
 // resets each counter every 1 second
-// > when to close connection? => any of them closed
-// > need circularbuf
-// we might reach the limits from on_readable or on_writable
-// if reached, set a flag and disable read/write event
-// keep track the event we disabled, in order to recover
+// if reached, (set a flag) and disable read/write event
+// recover the event we disabled
 
 
 Client::Client(int fd, const struct sockaddr_in& _addr, Connection* _conn):
     addr{get_host_and_port(_addr)}, conn{_conn}, queued_output{new Circularbuf()}
 {
+    LOG1("[%s] Connection created (#%d)\n", c_addr(), fd);
     read_evt = new_read_event(fd, Client::on_readable, this);
     write_evt = new_write_event(fd, Client::on_writable, this);
 }
@@ -39,21 +37,23 @@ void Client::on_readable(int/*fd*/, short/*flag*/, void* arg) {
 }
 
 void Client::on_writable(int fd, short/*flag*/, void* arg) {
-    // enable server's read because we removed it before
+    // write some
     auto client = reinterpret_cast<Client*>(arg);
     auto conn = client->conn;
-    conn->server->start_reading();
-    client->stop_writing();
-    // write some
     auto stat = client->queued_output->write_all_to(fd);
     LOG2("[%s] %6lu <<<< queue(%lu)\n", client->c_addr(),
          stat.nbytes, client->queued_output->data_size());
+    // re-enable server's read because we disabled it before
+    if (s2c_quota > 0) { [[likely]]
+        conn->server->start_reading();
+    }
+    client->stop_writing();
 }
 
 Server::Server(Connection* _conn):
     conn{_conn}, queued_output{new Circularbuf()}
 {
-    int sock = connect_TCP(server_addr);
+    int sock = connect_TCP(Server::address);
     if (sock < 0) { [[unlikely]]
         WARNING("Server down or having network issue.");
         throw ConnectionError();
@@ -78,27 +78,31 @@ Server::~Server() {
 }
 
 void Server::on_readable(int/*fd*/, short/*flag*/, void* arg) {
-    reinterpret_cast<Client*>(arg)->conn->forward_server_to_client();
+    reinterpret_cast<Server*>(arg)->conn->forward_server_to_client();
 }
 
 void Server::on_writable(int fd, short/*flag*/, void* arg) {
-    // enable client's read because we removed it before
+    // write some
     auto server = reinterpret_cast<Server*>(arg);
     auto conn = server->conn;
-    conn->client->start_reading();
-    server->stop_writing();
-    // write some
     auto stat = server->queued_output->write_all_to(fd);
     LOG2("[%s] %9s queue(%lu) >>>> %-6lu [SERVER]\n", conn->client->c_addr(),
          "", server->queued_output->data_size(), stat.nbytes);
+    // re-enable client's read because we disabled it before
+    if (c2s_quota > 0) { [[likely]]
+        conn->client->start_reading();
+    }
+    server->stop_writing();
 }
 
 void Connection::forward_client_to_server() {
-    // append to server's queued output, and write them out
-    auto stat_c = server->queued_output->read_all_from(client->get_fd());
+    // first store to global buffer
+    auto stat_c = read_all(client->get_fd(), global_buffer,
+                           min(server->queued_output->remaining_space(), c2s_quota));
+    c2s_quota -= stat_c.nbytes;
+    // then append to server's queued output, and write them out
+    server->queued_output->copy_from(global_buffer, stat_c.nbytes);
     auto stat_s = server->queued_output->write_all_to(server->get_fd());
-    // TODO: where's the limit?
-    c2s_count += stat_s.nbytes;
     LOG2("[%s] %6lu >>>> queue(%lu) >>>> %-6lu [SERVER]\n", client->c_addr(),
          stat_c.nbytes, server->queued_output->data_size(), stat_s.nbytes);
     if (stat_c.has_eof) { [[unlikely]]  // client closed
@@ -110,15 +114,22 @@ void Connection::forward_client_to_server() {
         client->stop_reading();
         server->start_writing();
         LOG2("[%s] Server temporarily unwritable.\n", client->c_addr());
+    } else if (c2s_quota <= 0) { [[unlikely]]
+        client->stop_reading();
     }
+    /* TODO(davidhcefx): Some data might be stuck in the queue.
+        Eg. The pipe between A and B (A)-===-(B) , when A has no water, there
+        might be some water remaining in the pipe. */
 }
 
 void Connection::forward_server_to_client() {
-    // append to client's queued output, and write them out
-    auto stat_s = client->queued_output->read_all_from(server->get_fd());
+    // first store to global buffer
+    auto stat_s = read_all(server->get_fd(), global_buffer,
+                           min(client->queued_output->remaining_space(), s2c_quota));
+    s2c_quota -= stat_s.nbytes;
+    // then append to client's queued output, and write them out
+    client->queued_output->copy_from(global_buffer, stat_s.nbytes);
     auto stat_c = client->queued_output->write_all_to(client->get_fd());
-    // TODO
-    s2c_count += stat_c.nbytes;
     LOG2("[%s] %6lu <<<< queue(%lu) <<<< %-6lu [SERVER]\n", client->c_addr(),
          stat_c.nbytes, client->queued_output->data_size(), stat_s.nbytes);
     if (stat_s.has_eof) { [[unlikely]]  // server closed
@@ -130,6 +141,8 @@ void Connection::forward_server_to_client() {
         server->stop_reading();
         client->start_writing();
         LOG2("[%s] Client temporarily unwritable.\n", client->c_addr());
+    } else if (s2c_quota <= 0) { [[unlikely]]
+        server->stop_reading();
     }
 }
 
@@ -144,7 +157,6 @@ void Connection::accept_new(int master_sock, short/*flag*/, void*/*arg*/) {
         Connection* conn = new Connection(sock, addr);
         conn->client->start_reading();
         conn->server->start_reading();
-        LOG1("[%s] Connection created (#%d)\n", conn->client->c_addr(), sock);
     } catch (ConnectionError& err) {
         close(sock);
         return;
@@ -298,7 +310,7 @@ void help() {
 
 int main(int argc, char* argv[]) {
     unsigned short s_port = 80;  // server port
-    uint64_t max_speed = 10;
+    Connection::max_speed = 10;
     char c;
     while ((c = getopt(argc, argv, "p:s:h")) > 0) {
         switch (c) {
@@ -323,7 +335,7 @@ int main(int argc, char* argv[]) {
     unsigned short p_port = atoi(argv[optind++]);
     const char* s_host = argv[optind++];
 
-    server_addr = {
+    Server::address = {
         .sin_family = AF_INET,
         .sin_port = htons(s_port),
         .sin_addr = resolve_host(s_host),
