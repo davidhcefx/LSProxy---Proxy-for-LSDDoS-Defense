@@ -115,12 +115,12 @@ using std::swap;
  *     to cut off downloads that are too slow.
  *     > Use event-based architecture to prevent proxy itself from LSDDoS.
  *     > Reduce memory usage so that we can endure a lot of slow connections.
- *     > [TODO] To defend read attacks, one way is to detect identical
+ *     > [Future work] To defend read attacks, one way is to detect identical
  *       bodies through E-Tag or similar header fields, and utilize caching.
  * [Monitor] We monitor data rates periodically, either in every certain amount
  *     of time or when certain amount of bytes received. (The period should
  *     be short, for it opens up a window for DoS attack)
- *     > [TODO] Is there an optimal monitoring rate?
+ *     > [Future work] Is there an optimal monitoring rate?
  * [Transition] When we find a connection suspicious, we first stop collecting
  *     further requests, then close server connection after a short delay in
  *     case there are remaining responses. After switching to slow-mode, we

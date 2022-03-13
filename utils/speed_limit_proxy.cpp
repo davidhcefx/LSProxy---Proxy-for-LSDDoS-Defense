@@ -9,6 +9,7 @@ struct sockaddr_in Server::address;
 int64_t Connection::max_speed;
 
 
+// TODO(davidhcefx): in contruction...
 // resets each counter every 1 second
 // if reached, (set a flag) and disable read/write event
 // recover the event we disabled
@@ -318,7 +319,7 @@ int main(int argc, char* argv[]) {
             s_port = atoi(optarg);
             break;
         case 's':
-            max_speed = atoi(optarg);
+            Connection::max_speed = atoi(optarg);
             break;
         case 'h':
             help();
