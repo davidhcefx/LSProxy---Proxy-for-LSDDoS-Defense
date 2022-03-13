@@ -1,0 +1,16 @@
+List of TODOs: (priority low -> high) (some have already been stated in the code)
+
+- [ ] Expand our work to other protocals.
+- [ ] HTTP/2.0 support.
+- [ ] IPv6 support.
+- [ ] TLS (HTTPS) support.
+- [ ] Be extra safe when replying (as stated in set_reply_only_mode).
+- [ ] Is there an optimal monitoring rate (MONITOR_INTERVAL) other than the current one?
+- [ ] Update llhttp, so that we can use public api on parser.
+- [ ] Utilize caching (through E-tag header fields), to better defend read attacks.
+- [ ] Limit slow queue's max size to restrict what slow attackers can do.
+- [ ] Set keep-alive timeout short to prevent false positives. (but how?)
+- [ ] Correct IP via including X-Forwarded-For and other headers.
+- [ ] The "newbie first-pass guarantee" might double the attack surface in worse case scenario.
+      Choose another way to calculate data rates.
+- [ ] Verify that speed limit proxy does function correctly.

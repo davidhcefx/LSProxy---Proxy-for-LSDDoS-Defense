@@ -115,12 +115,12 @@ using std::swap;
  *     to cut off downloads that are too slow.
  *     > Use event-based architecture to prevent proxy itself from LSDDoS.
  *     > Reduce memory usage so that we can endure a lot of slow connections.
- *     > [Future work] To defend read attacks, one way is to detect identical
+ *     > [TODO] To defend read attacks, one way is to detect identical
  *       bodies through E-Tag or similar header fields, and utilize caching.
  * [Monitor] We monitor data rates periodically, either in every certain amount
  *     of time or when certain amount of bytes received. (The period should
  *     be short, for it opens up a window for DoS attack)
- *     > [Future work] Better detection metrics other than DTR?
+ *     > [TODO] Is there an optimal monitoring rate?
  * [Transition] When we find a connection suspicious, we first stop collecting
  *     further requests, then close server connection after a short delay in
  *     case there are remaining responses. After switching to slow-mode, we
@@ -147,20 +147,6 @@ using std::swap;
  *   Server:
  *     - queued_output: SOCK_IO_BUF_SIZE
  *   Total: MAX_CONNECTION * (2 * SOCK_IO_BUF_SIZE + HIST_CACHE_SIZE)
- * 
- * PROGRESS:
- * [x] Event-based arch.
- * [x] Fast-mode
- * [x] History temp
- * [x] Slow-mode + llhttp + req (hybrid) buffer + resp file buffer
- * [x] Date rates monitor
- * [x] Transition logic
- * [x] Detect server down
- * [ ] Shorter keep-alive timeout
- * [ ] Read defense (caching)
- * [ ] TLS support
- * [ ] IPv6 support
- * [ ] HTTP/2.0 support
  */
 
 class Filebuf;

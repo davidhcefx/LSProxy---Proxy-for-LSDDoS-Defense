@@ -33,10 +33,11 @@ class Client {
     void send_response_slowly(int fd);
     // disable further receiving and only reply msg
     void set_reply_only_mode() {
-        // TODO(davidhcefx): use Filebuf or set timeout to prevent read attack
         stop_reading();
         start_writing();
         LOG3("[%s] Client been set to reply-only mode.\n", c_addr());
+        /* TODO(davidhcefx): Although all traffics do subject to min download speed limit,
+            it is better to use a Filebuf or set timeout here in case of read attacks. */
     }
     void stop_reading() { del_event(read_evt); }
     void stop_writing() { del_event(write_evt); }
