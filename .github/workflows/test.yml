@@ -9,7 +9,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v2
 
@@ -17,11 +16,11 @@ jobs:
 #     - name: configure
 #       run: ./configure
 
-    - name: Lowers MAX_CONNECTION to cope with CI's limitation
+    - name: Decrease MAX_CONNECTION to cope with CI's limitation
       run: sed -i -E 's/^(#define +MAX_CONNECTION).*/\1 9360/' src/ls_proxy.h
 
-    - name: make
-      run: make
+    - name: Build
+      run: make -j
 
     - name: Test
       run: make test
