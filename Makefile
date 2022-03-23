@@ -11,7 +11,8 @@ STDVER = $(shell if [ "$(CPPVER)" -ge 10 ]; then echo 'c++20'; else echo 'c++2a'
 CPPFLAGS = -Wall -Wextra -std=$(STDVER) $(if $(DEBUG), -g -Og, -O2)
 
 
-all: g++9 libevent check_limit shorten_timeout ls_proxy
+all: g++9 libevent check_limit shorten_timeout
+	$(MAKE) ls_proxy
 
 ls_proxy: $(SRC) src/*.h
 	$(CPP) $(CPPFLAGS) -o $@ $(SRC) src/llhttp/libllhttp.so -levent
@@ -22,13 +23,13 @@ simple_attack: utils/simple_attack.cpp
 speed_limit_proxy: $(addprefix utils/, speed_limit_proxy.cpp buffer.cpp buffer.h)
 	$(CPP) $(CPPFLAGS) -o $@ $(filter %.cpp,$^) -levent
 
+test:
+	make -C test all
+
 utils/buffer.h:
 	# replace the original include with our file
 	cp src/buffer.h $@; \
 	sed -i 's/^#include "ls_proxy.h".*/#include "speed_limit_proxy.h"/' $@
-
-test:
-	make -C test all
 
 g++9:
 	# check if g++-9 or above has been installed
@@ -70,10 +71,10 @@ check_limit:
 shorten_timeout:
 	./utils/shorten_connection_timeout.sh
 
-clean-test:
-	make -C test clean
-
 clean: clean-test
 	rm -f ls_proxy simple_attack speed_limit_proxy utils/buffer.h core*
+
+clean-test:
+	make -C test clean
 
 .PHONY: all test g++9 libevent check_limit shorten_timeout clean

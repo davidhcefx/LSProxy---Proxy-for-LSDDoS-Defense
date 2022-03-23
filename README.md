@@ -1,6 +1,8 @@
 # LSProxy - Proxy for LSDDoS Defense
 
 [![Build & Test](https://github.com/davidhcefx/LSProxy---Proxy-for-LSDDoS-Defense/actions/workflows/test.yml/badge.svg)](https://github.com/davidhcefx/LSProxy---Proxy-for-LSDDoS-Defense/actions/workflows/test.yml)
+[![CodeQL](https://github.com/davidhcefx/LSProxy---Proxy-for-LSDDoS-Defense/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/davidhcefx/LSProxy---Proxy-for-LSDDoS-Defense/actions/workflows/codeql-analysis.yml)
+[![flawfinder](https://github.com/davidhcefx/LSProxy---Proxy-for-LSDDoS-Defense/actions/workflows/flawfinder-analysis.yml/badge.svg)](https://github.com/davidhcefx/LSProxy---Proxy-for-LSDDoS-Defense/actions/workflows/flawfinder-analysis.yml)
 
 LSProxy is a [reverse proxy][] to defend low and slow DDoS attacks (LSDDoS), which is a kind of application layer denial of service attack (DoS) that drains server's resources by sending packages at a very slow date rate. There are three kinds of LSDDoS, namely **Slow header attacks**, **Slow body attacks** and **Slow read attacks**. This solution is capable of protecting both [Apache][] and [Nginx][] server, doesn't require [additional server-side modifications][] (which could turn into a tedious task for web admins), and is tolerable to low bandwidth users (meaning that users' connections won't be dropped due to their network being slow).
 
